@@ -17,9 +17,9 @@ export default {
             // 调用CheckProxyIP函数
             const result = await CheckProxyIP(proxyIP);
 
-            // 返回JSON响应
+            // 返回JSON响应，根据检查结果设置不同的状态码
             return new Response(JSON.stringify(result, null, 2), {
-                status: 200,
+                status: result.success ? 200 : 502,
                 headers: {
                     "Content-Type": "application/json",
                     "Access-Control-Allow-Origin": "*"
