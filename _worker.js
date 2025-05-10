@@ -1,135 +1,135 @@
 import { connect } from "cloudflare:sockets";
 
 export default {
-    async fetch(request, env, ctx) {
-        const url = new URL(request.url);
-        const path = url.pathname;
-        const hostname = url.hostname;
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+    const hostname = url.hostname;
 
-        // 不区分大小写检查路径
-        if (path.toLowerCase() === '/check') {
-            if (!url.searchParams.has('proxyip')) {
-                return new Response('Missing proxyip parameter', { status: 400 });
-            }
-            // 获取参数中的IP或使用默认IP
-            const proxyIP = url.searchParams.get('proxyip');
+    // 不区分大小写检查路径
+    if (path.toLowerCase() === '/check') {
+      if (!url.searchParams.has('proxyip')) return new Response('Missing proxyip parameter', { status: 400 });
+      if (url.searchParams.get('proxyip') === '') return new Response('Invalid proxyip parameter', { status: 400 });
+      if (!url.searchParams.get('proxyip').includes('.') && !(url.searchParams.get('proxyip').includes('[') && url.searchParams.get('proxyip').includes(']'))) return new Response('Invalid proxyip format', { status: 400 });
+      // 获取参数中的IP或使用默认IP
+      const proxyIP = url.searchParams.get('proxyip').toLowerCase();
 
-            // 调用CheckProxyIP函数
-            const result = await CheckProxyIP(proxyIP);
+      // 调用CheckProxyIP函数
+      const result = await CheckProxyIP(proxyIP);
 
-            // 返回JSON响应，根据检查结果设置不同的状态码
-            return new Response(JSON.stringify(result, null, 2), {
-                status: result.success ? 200 : 502,
-                headers: {
-                    "Content-Type": "application/json",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            });
-        } else {
-            return await HTML(hostname);
+      // 返回JSON响应，根据检查结果设置不同的状态码
+      return new Response(JSON.stringify(result, null, 2), {
+        status: result.success ? 200 : 502,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*"
         }
+      });
+    } else {
+      return await HTML(hostname);
     }
+  }
 };
 
 // 封装成CheckProxyIP函数
 async function CheckProxyIP(proxyIP) {
-    //const portRemote = proxyIP.includes('.tp') ? parseInt(proxyIP.split('.tp')[1].split('.')[0]) || 443 : 443;
-    let portRemote = 443;
-    if (proxyIP.includes('.tp')) {
-        const portMatch = proxyIP.match(/\.tp(\d+)\./);
-        if (portMatch) portRemote = parseInt(portMatch[1]);
-    } else if (proxyIP.includes(':')) {
-        portRemote = parseInt(proxyIP.split(':')[1]);
-        proxyIP = proxyIP.split(':')[0];
-    }
+  //const portRemote = proxyIP.includes('.tp') ? parseInt(proxyIP.split('.tp')[1].split('.')[0]) || 443 : 443;
+  let portRemote = 443;
+  if (proxyIP.includes('.tp')) {
+    const portMatch = proxyIP.match(/\.tp(\d+)\./);
+    if (portMatch) portRemote = parseInt(portMatch[1]);
+  } else if (proxyIP.includes(':')) {
+    portRemote = parseInt(proxyIP.split(':')[1]);
+    proxyIP = proxyIP.split(':')[0];
+  }
 
-    const tcpSocket = connect({
-        hostname: proxyIP,
-        port: portRemote,
-    });
+  const tcpSocket = connect({
+    hostname: proxyIP,
+    port: portRemote,
+  });
 
-    try {
-        // 构建HTTP GET请求
-        const httpRequest =
-            "GET /cdn-cgi/trace HTTP/1.1\r\n" +
-            "Host: speed.cloudflare.com\r\n" +
-            "User-Agent: CheckProxyIP/cmliu\r\n" +
-            "Connection: close\r\n\r\n";
+  try {
+    // 构建HTTP GET请求
+    const httpRequest =
+      "GET /cdn-cgi/trace HTTP/1.1\r\n" +
+      "Host: speed.cloudflare.com\r\n" +
+      "User-Agent: CheckProxyIP/cmliu\r\n" +
+      "Connection: close\r\n\r\n";
 
-        // 发送HTTP请求
-        const writer = tcpSocket.writable.getWriter();
-        await writer.write(new TextEncoder().encode(httpRequest));
-        writer.releaseLock();
+    // 发送HTTP请求
+    const writer = tcpSocket.writable.getWriter();
+    await writer.write(new TextEncoder().encode(httpRequest));
+    writer.releaseLock();
 
-        // 读取HTTP响应
-        const reader = tcpSocket.readable.getReader();
-        let responseData = new Uint8Array(0);
-        let receivedData = false;
+    // 读取HTTP响应
+    const reader = tcpSocket.readable.getReader();
+    let responseData = new Uint8Array(0);
+    let receivedData = false;
 
-        // 读取所有可用数据
-        while (true) {
-            const { value, done } = await Promise.race([
-                reader.read(),
-                new Promise(resolve => setTimeout(() => resolve({ done: true }), 5000)) // 5秒超时
-            ]);
+    // 读取所有可用数据
+    while (true) {
+      const { value, done } = await Promise.race([
+        reader.read(),
+        new Promise(resolve => setTimeout(() => resolve({ done: true }), 5000)) // 5秒超时
+      ]);
 
-            if (done) break;
-            if (value) {
-                receivedData = true;
-                // 合并数据
-                const newData = new Uint8Array(responseData.length + value.length);
-                newData.set(responseData);
-                newData.set(value, responseData.length);
-                responseData = newData;
+      if (done) break;
+      if (value) {
+        receivedData = true;
+        // 合并数据
+        const newData = new Uint8Array(responseData.length + value.length);
+        newData.set(responseData);
+        newData.set(value, responseData.length);
+        responseData = newData;
 
-                // 检查是否接收到完整响应
-                const responseText = new TextDecoder().decode(responseData);
-                if (responseText.includes("\r\n\r\n") &&
-                    (responseText.includes("Connection: close") || responseText.includes("content-length"))) {
-                    break;
-                }
-            }
-        }
-        reader.releaseLock();
-
-        // 解析HTTP响应
+        // 检查是否接收到完整响应
         const responseText = new TextDecoder().decode(responseData);
-        const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
-        const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-
-        // 判断是否成功
-        const isSuccessful = responseText.toLowerCase().includes('cloudflare');
-
-        // 构建JSON响应
-        const jsonResponse = {
-            success: isSuccessful,
-            proxyIP: isSuccessful ? proxyIP : -1,
-            portRemote: isSuccessful ? portRemote : -1,
-            //statusCode: statusCode || null,
-            //responseSize: responseData.length,
-            //responseData: responseText,
-            timestamp: new Date().toISOString(),
-        };
-
-        // 关闭连接
-        await tcpSocket.close();
-
-        return jsonResponse;
-    } catch (error) {
-        // 连接失败，返回失败的JSON
-        return {
-            success: false,
-            proxyIP: -1,
-            portRemote: -1,
-            timestamp: new Date().toISOString(),
-            error: error.message || error.toString()
-        };
+        if (responseText.includes("\r\n\r\n") &&
+          (responseText.includes("Connection: close") || responseText.includes("content-length"))) {
+          break;
+        }
+      }
     }
+    reader.releaseLock();
+
+    // 解析HTTP响应
+    const responseText = new TextDecoder().decode(responseData);
+    const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
+    const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
+
+    // 判断是否成功
+    const isSuccessful = responseText.toLowerCase().includes('cloudflare');
+
+    // 构建JSON响应
+    const jsonResponse = {
+      success: isSuccessful,
+      proxyIP: isSuccessful ? proxyIP : -1,
+      portRemote: isSuccessful ? portRemote : -1,
+      //statusCode: statusCode || null,
+      //responseSize: responseData.length,
+      //responseData: responseText,
+      timestamp: new Date().toISOString(),
+    };
+
+    // 关闭连接
+    await tcpSocket.close();
+
+    return jsonResponse;
+  } catch (error) {
+    // 连接失败，返回失败的JSON
+    return {
+      success: false,
+      proxyIP: -1,
+      portRemote: -1,
+      timestamp: new Date().toISOString(),
+      error: error.message || error.toString()
+    };
+  }
 }
 
 async function HTML(hostname) {
-    // 首页 HTML
-    const html = `<!DOCTYPE html>
+  // 首页 HTML
+  const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -536,7 +536,7 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
 </html>
 `;
 
-    return new Response(html, {
-        headers: { "content-type": "text/html;charset=UTF-8" }
-    });
+  return new Response(html, {
+    headers: { "content-type": "text/html;charset=UTF-8" }
+  });
 }
