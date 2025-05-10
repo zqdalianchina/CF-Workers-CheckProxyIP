@@ -453,7 +453,7 @@ curl "https://${hostname}/check?proxyip=1.2.3.4:443"
   </div>
 
   <div class="footer">
-    &copy; 2025 Check ProxyIP by cmliu
+    &copy; 2025 Check ProxyIP - 基于 Cloudflare Workers 构建的高性能 ProxyIP 验证服务 | by cmliu
   </div>
 
   <script>
