@@ -1,5 +1,5 @@
 # CF-Workers-CheckProxyIP
-CheckProxyIP
+验证CF ProxyIP可用性
 
 ## 项目介绍
 该项目使用 Cloudflare Workers 来检查代理 IP 是否可用。
