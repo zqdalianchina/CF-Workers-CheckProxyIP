@@ -1,0 +1,37 @@
+name: Sync from upstream
+
+on:
+  schedule:
+    # Runs every 3 days at 2:00 AM UTC
+    # Cron syntax: minute hour day_of_month month day_of_week
+    # 0 2 */3 * * : 2点0分 每3天执行一次 (例如, 月份的 1, 4, 7, 10... 号)
+    - cron: '0 2 */3 * *'
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  sync_with_upstream:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        # Fetch all history to be able to fetch from upstream
+        fetch-depth: 0
+
+    - name: Add upstream remote
+      run: git remote add upstream https://github.com/cmliu/CF-Workers-CheckProxyIP.git
+
+    - name: Fetch upstream changes
+      run: git fetch upstream
+
+    - name: Merge upstream changes
+      # Assuming your default branch is 'main'. If it's 'master', change 'main' to 'master'.
+      # And assuming the original repo's default branch is 'main'. Check original repo settings.
+      run: git merge upstream/main -m "Merge upstream changes"
+
+    - name: Push changes
+      run: git push origin main
+      # Assuming your default branch is 'main'. Change 'main' to your branch name.
+      # GITHUB_TOKEN has push permissions by default if workflow permissions are set correctly.
