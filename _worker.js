@@ -1,1815 +1,3117 @@
-import { connect } from "cloudflare:sockets";
-let 临时TOKEN, 永久TOKEN;
 export default {
-  async fetch(request, env, ctx) {
-    const 网站图标 = env.ICO || 'https://cf-assets.www.cloudflare.com/dzlvafdwdttg/19kSkLSfWtDcspvQI5pit4/c5630cf25d589a0de91978ca29486259/performance-acceleration-bolt.svg';
-    const url = new URL(request.url);
-    const UA = request.headers.get('User-Agent') || 'null';
-    const path = url.pathname;
-    const hostname = url.hostname;
-    const currentDate = new Date();
-    const timestamp = Math.ceil(currentDate.getTime() / (1000 * 60 * 31)); // 每31分钟一个时间戳
-    临时TOKEN = await 双重哈希(url.hostname + timestamp + UA);
-    永久TOKEN = env.TOKEN || 临时TOKEN;
+	async fetch(request) {
+		const url = new URL(request.url);
 
-    // 不区分大小写检查路径
-    if (path.toLowerCase() === '/check') {
-      if (!url.searchParams.has('proxyip')) return new Response('Missing proxyip parameter', { status: 400 });
-      if (url.searchParams.get('proxyip') === '') return new Response('Invalid proxyip parameter', { status: 400 });
-      if (!url.searchParams.get('proxyip').includes('.') && !(url.searchParams.get('proxyip').includes('[') && url.searchParams.get('proxyip').includes(']'))) return new Response('Invalid proxyip format', { status: 400 });
+		if (url.pathname === '/resolve') {
+			const proxyip = url.searchParams.get('proxyip');
+			if (!proxyip) {
+				return new Response('Missing proxyip', { status: 400 });
+			}
 
-      if (env.TOKEN) {
-        if (!url.searchParams.has('token') || url.searchParams.get('token') !== 永久TOKEN) {
-          return new Response(JSON.stringify({
-            status: "error",
-            message: `ProxyIP查询失败: 无效的TOKEN`,
-            timestamp: new Date().toISOString()
-          }, null, 4), {
-            status: 403,
-            headers: {
-              "content-type": "application/json; charset=UTF-8",
-              'Access-Control-Allow-Origin': '*'
-            }
-          });
-        }
-      }
-
-      // 获取参数中的IP或使用默认IP
-      const proxyIP = url.searchParams.get('proxyip').toLowerCase();
-      const colo = request.cf?.colo || 'CF';
-      // 调用CheckProxyIP函数
-      const result = await CheckProxyIP(proxyIP, colo);
-
-      // 返回JSON响应，根据检查结果设置不同的状态码
-      return new Response(JSON.stringify(result, null, 2), {
-        status: result.success ? 200 : 502,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*"
-        }
-      });
-    } else if (path.toLowerCase() === '/resolve') {
-      if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `域名查询失败: 无效的TOKEN`,
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 403,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-      if (!url.searchParams.has('domain')) return new Response('Missing domain parameter', { status: 400 });
-      const domain = url.searchParams.get('domain');
-
-      try {
-        const ips = await resolveDomain(domain);
-        return new Response(JSON.stringify({ success: true, domain, ips }), {
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      } catch (error) {
-        return new Response(JSON.stringify({ success: false, error: error.message }), {
-          status: 500,
-          headers: {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*"
-          }
-        });
-      }
-    } else if (path.toLowerCase() === '/ip-info') {
-      if (!url.searchParams.has('token') || (url.searchParams.get('token') !== 临时TOKEN) && (url.searchParams.get('token') !== 永久TOKEN)) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `IP查询失败: 无效的TOKEN`,
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 403,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-      let ip = url.searchParams.get('ip') || request.headers.get('CF-Connecting-IP');
-      if (!ip) {
-        return new Response(JSON.stringify({
-          status: "error",
-          message: "IP参数未提供",
-          code: "MISSING_PARAMETER",
-          timestamp: new Date().toISOString()
-        }, null, 4), {
-          status: 400,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-
-      if (ip.includes('[')) {
-        ip = ip.replace('[', '').replace(']', '');
-      }
-
-      try {
-        // 使用Worker代理请求HTTP的IP API
-        const response = await fetch(`http://ip-api.com/json/${ip}?lang=zh-CN`);
-
-        if (!response.ok) {
-          throw new Error(`HTTP error: ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        // 添加时间戳到成功的响应数据中
-        data.timestamp = new Date().toISOString();
-
-        // 返回数据给客户端，并添加CORS头
-        return new Response(JSON.stringify(data, null, 4), {
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-
-      } catch (error) {
-        console.error("IP查询失败:", error);
-        return new Response(JSON.stringify({
-          status: "error",
-          message: `IP查询失败: ${error.message}`,
-          code: "API_REQUEST_FAILED",
-          query: ip,
-          timestamp: new Date().toISOString(),
-          details: {
-            errorType: error.name,
-            stack: error.stack ? error.stack.split('\n')[0] : null
-          }
-        }, null, 4), {
-          status: 500,
-          headers: {
-            "content-type": "application/json; charset=UTF-8",
-            'Access-Control-Allow-Origin': '*'
-          }
-        });
-      }
-    } else {
-      const envKey = env.URL302 ? 'URL302' : (env.URL ? 'URL' : null);
-      if (envKey) {
-        const URLs = await 整理(env[envKey]);
-        const URL = URLs[Math.floor(Math.random() * URLs.length)];
-        return envKey === 'URL302' ? Response.redirect(URL, 302) : fetch(new Request(URL, request));
-      } else if (env.TOKEN) {
-        return new Response(await nginx(), {
-          headers: {
-            'Content-Type': 'text/html; charset=UTF-8',
-          },
-        });
-      } else if (path.toLowerCase() === '/favicon.ico') {
-        return Response.redirect(网站图标, 302);
-      }
-      // 直接返回HTML页面，路径解析交给前端处理
-      return await HTML(hostname, 网站图标);
-    }
-  }
+			try {
+				const targets = await handleResolve(proxyip);
+				return new Response(JSON.stringify(targets), {
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			} catch (error) {
+				return new Response(JSON.stringify({ error: error.message }), {
+					status: 500,
+					headers: {
+						'Content-Type': 'application/json',
+						'Access-Control-Allow-Origin': '*'
+					}
+				});
+			}
+		} else if (url.pathname === '/locations') return fetch(new Request('https://speed.cloudflare.com/locations', { headers: { 'Referer': 'https://speed.cloudflare.com/' } }));
+		return new Response(generateHTML(), {
+			headers: { 'Content-Type': 'text/html; charset=UTF-8' }
+		});
+	}
 };
 
-// 新增域名解析函数
-async function resolveDomain(domain) {
-  domain = domain.includes(':') ? domain.split(':')[0] : domain;
-  try {
-    // 并发请求IPv4和IPv6记录
-    const [ipv4Response, ipv6Response] = await Promise.all([
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=A`, {
-        headers: { 'Accept': 'application/dns-json' }
-      }),
-      fetch(`https://1.1.1.1/dns-query?name=${domain}&type=AAAA`, {
-        headers: { 'Accept': 'application/dns-json' }
-      })
-    ]);
+async function handleResolve(input) {
+	let { host, port } = parseTarget(input);
 
-    const [ipv4Data, ipv6Data] = await Promise.all([
-      ipv4Response.json(),
-      ipv6Response.json()
-    ]);
+	const tpPortMatch = host.toLowerCase().match(/\.tp(\d{1,5})\./);
+	if (tpPortMatch) {
+		const tpPort = Number(tpPortMatch[1]);
+		if (tpPort >= 1 && tpPort <= 65535) {
+			port = tpPort;
+		}
+	}
 
-    const ips = [];
+	const bracketedIPv6 = host.startsWith('[') && host.endsWith(']');
+	const rawIPv6 = /^[0-9a-fA-F:]+$/.test(host);
+	if (isIPv4(host) || bracketedIPv6 || rawIPv6) {
+		const finalHost = rawIPv6 && !bracketedIPv6 ? `[${host}]` : host;
+		return [`${finalHost}:${port}`];
+	}
 
-    // 添加IPv4地址
-    if (ipv4Data.Answer) {
-      const ipv4Addresses = ipv4Data.Answer
-        .filter(record => record.type === 1) // A记录
-        .map(record => record.data);
-      ips.push(...ipv4Addresses);
-    }
+	if (host.toLowerCase().includes('.william.')) {
+		const txtRecords = await dohQuery(host, 'TXT');
+		if (txtRecords.length) {
+			const targets = [];
+			for (const record of txtRecords) {
+				const value = normalizeTxtValue(record.data);
+				for (const part of value.split(',')) {
+					const candidate = part.trim();
+					if (candidate) targets.push(candidate);
+				}
+			}
+			if (targets.length) {
+				return targets;
+			}
+		}
+	}
 
-    // 添加IPv6地址
-    if (ipv6Data.Answer) {
-      const ipv6Addresses = ipv6Data.Answer
-        .filter(record => record.type === 28) // AAAA记录
-        .map(record => `[${record.data}]`); // IPv6地址用方括号包围
-      ips.push(...ipv6Addresses);
-    }
+	const [aRecords, aaaaRecords] = await Promise.all([
+		dohQuery(host, 'A'),
+		dohQuery(host, 'AAAA')
+	]);
 
-    if (ips.length === 0) {
-      throw new Error('No A or AAAA records found');
-    }
+	const results = [];
+	for (const record of aRecords.filter(item => item.type === 1 && item.data)) {
+		results.push(`${record.data}:${port}`);
+	}
+	for (const record of aaaaRecords.filter(item => item.type === 28 && item.data)) {
+		results.push(`[${record.data}]:${port}`);
+	}
 
-    return ips;
-  } catch (error) {
-    throw new Error(`DNS resolution failed: ${error.message}`);
-  }
+	if (!results.length) {
+		throw new Error('Could not resolve domain');
+	}
+
+	return results;
 }
 
-async function CheckProxyIP(proxyIP, colo = 'CF') {
-  let portRemote = 443;
-  if (proxyIP.includes('.tp')) {
-    const portMatch = proxyIP.match(/\.tp(\d+)\./);
-    if (portMatch) portRemote = parseInt(portMatch[1]);
-  } else if (proxyIP.includes('[') && proxyIP.includes(']:')) {
-    portRemote = parseInt(proxyIP.split(']:')[1]);
-    proxyIP = proxyIP.split(']:')[0] + ']';
-  } else if (proxyIP.includes(':')) {
-    portRemote = parseInt(proxyIP.split(':')[1]);
-    proxyIP = proxyIP.split(':')[0];
-  }
+function parseTarget(input) {
+	let host = String(input || '').trim();
+	let port = 443;
 
-  const tcpSocket = connect({
-    hostname: proxyIP,
-    port: portRemote,
-  });
+	if (host.startsWith('[')) {
+		const ipv6PortIndex = host.lastIndexOf(']:');
+		if (ipv6PortIndex !== -1) {
+			const maybePort = Number(host.slice(ipv6PortIndex + 2));
+			if (Number.isInteger(maybePort) && maybePort >= 1 && maybePort <= 65535) {
+				port = maybePort;
+				host = host.slice(0, ipv6PortIndex + 1);
+			}
+		}
+		return { host, port };
+	}
 
-  try {
-    // 构建HTTP GET请求
-    const httpRequest =
-      "GET /cdn-cgi/trace HTTP/1.1\r\n" +
-      "Host: speed.cloudflare.com\r\n" +
-      "User-Agent: CheckProxyIP/cmliu\r\n" +
-      "Connection: close\r\n\r\n";
+	const colonMatches = host.match(/:/g) || [];
+	if (colonMatches.length === 1) {
+		const separatorIndex = host.lastIndexOf(':');
+		const maybePort = Number(host.slice(separatorIndex + 1));
+		if (Number.isInteger(maybePort) && maybePort >= 1 && maybePort <= 65535) {
+			port = maybePort;
+			host = host.slice(0, separatorIndex);
+		}
+	}
 
-    // 发送HTTP请求
-    const writer = tcpSocket.writable.getWriter();
-    await writer.write(new TextEncoder().encode(httpRequest));
-    writer.releaseLock();
-
-    // 读取HTTP响应
-    const reader = tcpSocket.readable.getReader();
-    let responseData = new Uint8Array(0);
-    let receivedData = false;
-
-    // 读取所有可用数据
-    while (true) {
-      const { value, done } = await Promise.race([
-        reader.read(),
-        new Promise(resolve => setTimeout(() => resolve({ done: true }), 5000)) // 5秒超时
-      ]);
-
-      if (done) break;
-      if (value) {
-        receivedData = true;
-        // 合并数据
-        const newData = new Uint8Array(responseData.length + value.length);
-        newData.set(responseData);
-        newData.set(value, responseData.length);
-        responseData = newData;
-
-        // 检查是否接收到完整响应
-        const responseText = new TextDecoder().decode(responseData);
-        if (responseText.includes("\r\n\r\n") &&
-          (responseText.includes("Connection: close") || responseText.includes("content-length"))) {
-          break;
-        }
-      }
-    }
-    reader.releaseLock();
-
-    // 解析HTTP响应
-    const responseText = new TextDecoder().decode(responseData);
-    const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
-    const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-
-    // 判断是否成功
-    function isValidProxyResponse(responseText, responseData) {
-      const statusMatch = responseText.match(/^HTTP\/\d\.\d\s+(\d+)/i);
-      const statusCode = statusMatch ? parseInt(statusMatch[1]) : null;
-      const looksLikeCloudflare = responseText.includes("cloudflare") && responseText.includes("CF-RAY");
-      const isExpectedError = responseText.includes("The plain HTTP request was sent to HTTPS port") && responseText.includes("400 Bad Request");
-      const hasBody = responseData.length > 100;
-
-      return statusCode !== null && looksLikeCloudflare && isExpectedError && hasBody;
-    }
-    // 关闭连接
-    await tcpSocket.close();
-
-    const isSuccessful = isValidProxyResponse(responseText, responseData);
-    if (isSuccessful) {
-      console.log(`成功通过ProxyIP ${proxyIP}:${portRemote} 连接到Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
-      const tls握手 = await 验证反代IP(proxyIP, portRemote);
-
-      // 构建JSON响应
-      const jsonResponse = {
-        success: tls握手[0],
-        proxyIP: proxyIP,
-        portRemote: portRemote,
-        colo: colo,
-        responseTime: tls握手[2] ? tls握手[2] : -1,
-        message: tls握手[1],
-        timestamp: new Date().toISOString(),
-      };
-      return jsonResponse;
-    } else {
-      console.log(`无法通过ProxyIP ${proxyIP}:${portRemote} 访问Cloudflare，状态码: ${statusCode} 响应内容: ${responseText}`);
-      return {
-        success: false,
-        proxyIP: proxyIP,
-        portRemote: portRemote,
-        colo: colo,
-        responseTime: -1,
-        message: "无法通过ProxyIP访问Cloudflare",
-        timestamp: new Date().toISOString()
-      };
-    }
-  } catch (error) {
-    // 连接失败，返回失败的JSON
-    return {
-      success: false,
-      proxyIP: -1,
-      portRemote: -1,
-      colo: colo,
-      responseTime: -1,
-      message: error.message || error.toString(),
-      timestamp: new Date().toISOString()
-    };
-  }
+	return { host, port };
 }
 
-async function 整理(内容) {
-  var 替换后的内容 = 内容.replace(/[\r\n]+/g, '|').replace(/\|+/g, '|');
-  const 地址数组 = 替换后的内容.split('|');
-  const 整理数组 = 地址数组.filter((item, index) => {
-    return item !== '' && 地址数组.indexOf(item) === index;
-  });
-
-  return 整理数组;
+function isIPv4(value) {
+	const parts = value.split('.');
+	return parts.length === 4 && parts.every(part => {
+		if (!/^\d{1,3}$/.test(part)) return false;
+		const num = Number(part);
+		return num >= 0 && num <= 255;
+	});
 }
 
-async function 双重哈希(文本) {
-  const 编码器 = new TextEncoder();
-
-  const 第一次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(文本));
-  const 第一次哈希数组 = Array.from(new Uint8Array(第一次哈希));
-  const 第一次十六进制 = 第一次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
-
-  const 第二次哈希 = await crypto.subtle.digest('MD5', 编码器.encode(第一次十六进制.slice(7, 27)));
-  const 第二次哈希数组 = Array.from(new Uint8Array(第二次哈希));
-  const 第二次十六进制 = 第二次哈希数组.map(字节 => 字节.toString(16).padStart(2, '0')).join('');
-
-  return 第二次十六进制.toLowerCase();
+function normalizeTxtValue(value) {
+	const text = String(value ?? '').trim();
+	if (text.startsWith('"') && text.endsWith('"')) {
+		return text.slice(1, -1).replace(/\\"/g, '"');
+	}
+	return text.replace(/\\"/g, '"');
 }
 
-async function 验证反代IP(反代IP地址, 指定端口) {
-  const 最大重试次数 = 4;
-  let 最后错误 = null;
-  const 开始时间 = performance.now();
-  // 对于连接级别的重试，每次都重新建立连接
-  for (let 重试次数 = 0; 重试次数 < 最大重试次数; 重试次数++) {
-    let TCP接口 = null;
-    let 传输数据 = null;
-    let 读取数据 = null;
+async function dohQuery(name, type, endpoint = 'https://cloudflare-dns.com/dns-query') {
+	const startedAt = performance.now();
 
-    try {
-      // 每次重试都重新建立连接
-      const 连接超时 = 1000 + (重试次数 * 500); // 递增超时时间
-      TCP接口 = await 带超时连接({ hostname: 反代IP地址, port: 指定端口 }, 连接超时);
+	try {
+		const response = await fetch(
+			`${endpoint}?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`,
+			{
+				headers: {
+					accept: 'application/dns-json'
+				}
+			}
+		);
 
-      传输数据 = TCP接口.writable.getWriter();
-      读取数据 = TCP接口.readable.getReader();
+		if (!response.ok) {
+			console.warn(`[DoH] ${name} ${type} failed with status ${response.status}`);
+			return [];
+		}
 
-      // 发送TLS握手
-      await 传输数据.write(构建TLS握手());
+		const payload = await response.json();
+		if (!Array.isArray(payload.Answer)) {
+			console.log(`[DoH] ${name} ${type} returned 0 answers in ${(performance.now() - startedAt).toFixed(2)}ms`);
+			return [];
+		}
 
-      // 读取响应，超时时间也递增
-      const 读取超时 = 连接超时;
-      const { value: 返回数据, 超时 } = await 带超时读取(读取数据, 读取超时);
+		const answers = payload.Answer.map(answer => ({
+			name: answer.name || name,
+			type: answer.type,
+			TTL: answer.TTL,
+			data: answer.type === 16 ? normalizeTxtValue(answer.data) : answer.data
+		}));
 
-      if (超时) {
-        最后错误 = `第${重试次数 + 1}次重试：读取响应超时`;
-        throw new Error(最后错误);
-      }
-
-      if (!返回数据 || 返回数据.length === 0) {
-        最后错误 = `第${重试次数 + 1}次重试：未收到任何响应数据`;
-        throw new Error(最后错误);
-      }
-
-      // 检查TLS响应
-      if (返回数据[0] === 0x16) {
-        // 成功，清理资源
-        try {
-          读取数据.cancel();
-          TCP接口.close();
-        } catch (cleanupError) {
-          console.log('清理资源时出错:', cleanupError);
-        }
-        return [true, `第${重试次数 + 1}次验证有效ProxyIP`, Math.round(performance.now() - 开始时间)];
-      } else {
-        最后错误 = `第${重试次数 + 1}次重试：收到非TLS响应(0x${返回数据[0].toString(16).padStart(2, '0')})`;
-        throw new Error(最后错误);
-      }
-
-    } catch (error) {
-      // 记录具体错误
-      最后错误 = `第${重试次数 + 1}次重试失败: ${error.message || error.toString()}`;
-
-      // 判断是否应该继续重试
-      const 错误信息 = error.message || error.toString();
-      const 不应重试的错误 = [
-        '连接被拒绝',
-        'Connection refused',
-        '网络不可达',
-        'Network unreachable',
-        '主机不可达',
-        'Host unreachable'
-      ];
-
-      const 应该停止重试 = 不应重试的错误.some(errorPattern =>
-        错误信息.toLowerCase().includes(errorPattern.toLowerCase())
-      );
-
-      if (应该停止重试) {
-        最后错误 = `连接失败，无需重试: ${错误信息}`;
-        break; // 跳出重试循环
-      }
-
-    } finally {
-      // 确保每次重试后都清理资源
-      try {
-        if (读取数据) {
-          读取数据.cancel();
-        }
-        if (TCP接口) {
-          TCP接口.close();
-        }
-      } catch (cleanupError) {
-        console.log('清理资源时出错:', cleanupError);
-      }
-
-      // 等待资源完全释放
-      await new Promise(resolve => setTimeout(resolve, 100));
-    }
-
-    // 如果不是最后一次重试，等待一段时间再重试
-    if (重试次数 < 最大重试次数 - 1) {
-      const 等待时间 = 200 + (重试次数 * 300); // 递增等待时间
-      await new Promise(resolve => setTimeout(resolve, 等待时间));
-    }
-  }
-
-  // 所有重试都失败了
-  return [false, 最后错误 || '连接验证失败', -1];
+		console.log(`[DoH] ${name} ${type} returned ${answers.length} answers in ${(performance.now() - startedAt).toFixed(2)}ms`);
+		return answers;
+	} catch (error) {
+		console.error(`[DoH] ${name} ${type} error after ${(performance.now() - startedAt).toFixed(2)}ms`, error);
+		return [];
+	}
 }
 
-function 构建TLS握手() {
-  const hexStr =
-    '16030107a30100079f0303af1f4d78be2002cf63e8c727224cf1ee4a8ac89a0ad04bc54cbed5cd7c830880203d8326ae1d1d076ec749df65de6d21dec7371c589056c0a548e31624e121001e0020baba130113021303c02bc02fc02cc030cca9cca8c013c014009c009d002f0035010007361a1a0000000a000c000acaca11ec001d00170018fe0d00ba0000010001fc00206a2fb0535a0a5e565c8a61dcb381bab5636f1502bbd09fe491c66a2d175095370090dd4d770fc5e14f4a0e13cfd919a532d04c62eb4a53f67b1375bf237538cea180470d942bdde74611afe80d70ad25afb1d5f02b2b4eed784bc2420c759a742885f6ca982b25d0fdd7d8f618b7f7bc10172f61d446d8f8a6766f3587abbae805b8ef40fcb819194ac49e91c6c3762775f8dc269b82a21ddccc9f6f43be62323147b411475e47ea2c4efe52ef2cef5c7b32000d00120010040308040401050308050501080606010010000e000c02683208687474702f312e31000b0002010000050005010000000044cd00050003026832001b00030200020017000000230000002d000201010012000000000010000e00000b636861746770742e636f6dff01000100002b0007061a1a03040303003304ef04edcaca00010011ec04c05eac5510812e46c13826d28279b13ce62b6464e01ae1bb6d49640e57fb3191c656c4b0167c246930699d4f467c19d60dacaa86933a49e5c97390c3249db33c1aa59f47205701419461569cb01a22b4378f5f3bb21d952700f250a6156841f2cc952c75517a481112653400913f9ab58982a3f2d0010aba5ae99a2d69f6617a4220cd616de58ccbf5d10c5c68150152b60e2797521573b10413cb7a3aab25409d426a5b64a9f3134e01dc0dd0fc1a650c7aafec00ca4b4dddb64c402252c1c69ca347bb7e49b52b214a7768657a808419173bcbea8aa5a8721f17c82bc6636189b9ee7921faa76103695a638585fe678bcbb8725831900f808863a74c52a1b2caf61f1dec4a9016261c96720c221f45546ce0e93af3276dd090572db778a865a07189ae4f1a64c6dbaa25a5b71316025bd13a6012994257929d199a7d90a59285c75bd4727a8c93484465d62379cd110170073aad2a3fd947087634574315c09a7ccb60c301d59a7c37a330253a994a6857b8556ce0ac3cda4c6fe3855502f344c0c8160313a3732bce289b6bda207301e7b318277331578f370ccbcd3730890b552373afeb162c0cb59790f79559123b2d437308061608a704626233d9f73d18826e27f1c00157b792460eda9b35d48b4515a17c6125bdb96b114503c99e7043b112a398888318b956a012797c8a039a51147b8a58071793c14a3611fb0424e865f48a61cac7c43088c634161cea089921d229e1a370effc5eff2215197541394854a201a6ebf74942226573bb95710454bd27a52d444690837d04611b676269873c50c3406a79077e6606478a841f96f7b076a2230fd34f3eea301b77bf00750c28357a9df5b04f192b9c0bbf4f71891f1842482856b021280143ae74356c5e6a8e3273893086a90daa7a92426d8c370a45e3906994b8fa7a57d66b503745521e40948e83641de2a751b4a836da54f2da413074c3d856c954250b5c8332f1761e616437e527c0840bc57d522529b9259ccac34d7a3888f0aade0a66c392458cc1a698443052413217d29fbb9a1124797638d76100f82807934d58f30fcff33197fc171cfa3b0daa7f729591b1d7389ad476fde2328af74effd946265b3b81fa33066923db476f71babac30b590e05a7ba2b22f86925abca7ef8058c2481278dd9a240c8816bba6b5e6603e30670dffa7e6e3b995b0b18ec404614198a43a07897d84b439878d179c7d6895ac3f42ecb7998d4491060d2b8a5316110830c3f20a3d9a488a85976545917124c1eb6eb7314ea9696712b7bcab1cfd2b66e5a85106b2f651ab4b8a145e18ac41f39a394da9f327c5c92d4a297a0c94d1b8dcc3b111a700ac8d81c45f983ca029fd2887ad4113c7a23badf807c6d0068b4fa7148402aae15cc55971b57669a4840a22301caaec392a6ea6d46dab63890594d41545ebc2267297e3f4146073814bb3239b3e566684293b9732894193e71f3b388228641bb8be6f5847abb9072d269cb40b353b6aa3259ccb7e438d6a37ffa8cc1b7e4911575c41501321769900d19792aa3cfbe58b0aaf91c91d3b63900697279ad6c1aa44897a07d937e0d5826c24439420ca5d8a63630655ce9161e58d286fc885fcd9b19d096080225d16c89939a24aa1e98632d497b5604073b13f65bdfddc1de4b40d2a829b0521010c5f0f241b1ccc759049579db79983434fac2748829b33f001d0020a8e86c9d3958e0257c867e59c8082238a1ea0a9f2cac9e41f9b3cb0294f34b484a4a000100002900eb00c600c0afc8dade37ae62fa550c8aa50660d8e73585636748040b8e01d67161878276b1ec1ee2aff7614889bb6a36d2bdf9ca097ff6d7bf05c4de1d65c2b8db641f1c8dfbd59c9f7e0fed0b8e0394567eda55173d198e9ca40883b291ab4cada1a91ca8306ca1c37e047ebfe12b95164219b06a24711c2182f5e37374d43c668d45a3ca05eda90e90e510e628b4cfa7ae880502dae9a70a8eced26ad4b3c2f05d77f136cfaa622e40eb084dd3eb52e23a9aeff6ae9018100af38acfd1f6ce5d8c53c4a61c547258002120fe93e5c7a5c9c1a04bf06858c4dd52b01875844e15582dd566d03f41133183a0';
-  return new Uint8Array(hexStr.match(/.{1,2}/g).map(b => parseInt(b, 16)));
-}
-
-async function 带超时连接({ hostname, port }, 超时时间) {
-  const TCP接口 = connect({ hostname, port });
-  try {
-    await Promise.race([
-      TCP接口.opened,
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("连接超时")), 超时时间)
-      ),
-    ]);
-    return TCP接口; // ✅ 连接成功
-  } catch (err) {
-    TCP接口.close?.(); // 确保连接关闭
-    throw err; // ⛔ 抛出错误由调用者处理
-  }
-}
-function 带超时读取(reader, 超时) {
-  return new Promise(resolve => {
-    const timeoutId = setTimeout(() => resolve({ done: true, value: null, 超时: true }), 超时);
-    reader.read().then(result => {
-      clearTimeout(timeoutId);
-      resolve({ ...result, 超时: false });
-    });
-  });
-}
-
-async function nginx() {
-  const text = `
-    <!DOCTYPE html>
-    <html>
-    <head>
-    <title>Welcome to nginx!</title>
-    <style>
-        body {
-            width: 35em;
-            margin: 0 auto;
-            font-family: Tahoma, Verdana, Arial, sans-serif;
-        }
-    </style>
-    </head>
-    <body>
-    <h1>Welcome to nginx!</h1>
-    <p>If you see this page, the nginx web server is successfully installed and
-    working. Further configuration is required.</p>
-    
-    <p>For online documentation and support please refer to
-    <a href="http://nginx.org/">nginx.org</a>.<br/>
-    Commercial support is available at
-    <a href="http://nginx.com/">nginx.com</a>.</p>
-    
-    <p><em>Thank you for using nginx.</em></p>
-    </body>
-    </html>
-    `
-  return text;
-}
-
-async function HTML(hostname, 网站图标) {
-  // 首页 HTML
-  const html = `<!DOCTYPE html>
+function generateHTML() {
+	return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Check ProxyIP - 代理IP检测服务</title>
-  <link rel="icon" href="${网站图标}" type="image/x-icon">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --primary-color: #3498db;
-      --primary-dark: #2980b9;
-      --secondary-color: #1abc9c;
-      --success-color: #2ecc71;
-      --warning-color: #f39c12;
-      --error-color: #e74c3c;
-      --bg-primary: #ffffff;
-      --bg-secondary: #f8f9fa;
-      --bg-tertiary: #e9ecef;
-      --text-primary: #2c3e50;
-      --text-secondary: #6c757d;
-      --text-light: #adb5bd;
-      --border-color: #dee2e6;
-      --shadow-sm: 0 2px 4px rgba(0,0,0,0.1);
-      --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
-      --shadow-lg: 0 10px 25px rgba(0,0,0,0.15);
-      --border-radius: 12px;
-      --border-radius-sm: 8px;
-      --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-    
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-    
-    body {
-      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      line-height: 1.6;
-      color: var(--text-primary);
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-      min-height: 100vh;
-      position: relative;
-      overflow-x: hidden;
-    }
-    
-    .container {
-      max-width: 1000px;
-      margin: 0 auto;
-      padding: 20px;
-    }
-    
-    .header {
-      text-align: center;
-      margin-bottom: 50px;
-      animation: fadeInDown 0.8s ease-out;
-    }
-    
-    .main-title {
-      font-size: clamp(2.5rem, 5vw, 4rem);
-      font-weight: 700;
-      background: linear-gradient(135deg, #ffffff 0%, #f0f0f0 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      margin-bottom: 16px;
-      text-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-    
-    .subtitle {
-      font-size: 1.2rem;
-      color: rgba(255,255,255,0.9);
-      font-weight: 400;
-      margin-bottom: 8px;
-    }
-    
-    .badge {
-      display: inline-block;
-      background: rgba(255,255,255,0.2);
-      backdrop-filter: blur(10px);
-      padding: 8px 16px;
-      border-radius: 50px;
-      color: white;
-      font-size: 0.9rem;
-      font-weight: 500;
-      border: 1px solid rgba(255,255,255,0.3);
-    }
-    
-    .card {
-      background: var(--bg-primary);
-      border-radius: var(--border-radius);
-      padding: 32px;
-      box-shadow: var(--shadow-lg);
-      margin-bottom: 32px;
-      border: 1px solid var(--border-color);
-      transition: var(--transition);
-      animation: fadeInUp 0.8s ease-out;
-      backdrop-filter: blur(20px);
-      position: relative;
-      overflow: hidden;
-    }
-    
-    .card::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 4px;
-      background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-    }
-    
-    .card:hover {
-      transform: translateY(-4px);
-      box-shadow: 0 20px 40px rgba(0,0,0,0.15);
-    }
-    
-    .form-section {
-      margin-bottom: 32px;
-    }
-    
-    .form-label {
-      display: block;
-      font-weight: 600;
-      font-size: 1.1rem;
-      margin-bottom: 12px;
-      color: var(--text-primary);
-    }
-    
-    .input-group {
-      display: flex;
-      gap: 16px;
-      align-items: flex-end;
-      flex-wrap: wrap;
-    }
-    
-    .input-wrapper {
-      flex: 1;
-      min-width: 300px;
-      position: relative;
-    }
-    
-    .form-input {
-      width: 100%;
-      padding: 16px 20px;
-      border: 2px solid var(--border-color);
-      border-radius: var(--border-radius-sm);
-      font-size: 16px;
-      font-family: inherit;
-      transition: var(--transition);
-      background: var(--bg-primary);
-      color: var(--text-primary);
-    }
-    
-    .form-input:focus {
-      outline: none;
-      border-color: var(--primary-color);
-      box-shadow: 0 0 0 4px rgba(52, 152, 219, 0.1);
-      transform: translateY(-1px);
-    }
-    
-    .form-input::placeholder {
-      color: var(--text-light);
-    }
-    
-    .btn {
-      padding: 16px 32px;
-      border: none;
-      border-radius: var(--border-radius-sm);
-      font-size: 16px;
-      font-weight: 600;
-      font-family: inherit;
-      cursor: pointer;
-      transition: var(--transition);
-      text-decoration: none;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      min-width: 120px;
-      position: relative;
-      overflow: hidden;
-    }
-    
-    .btn::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: -100%;
-      width: 100%;
-      height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-      transition: left 0.6s;
-    }
-    
-    .btn:hover::before {
-      left: 100%;
-    }
-    
-    .btn-primary {
-      background: linear-gradient(135deg, var(--primary-color), var(--primary-dark));
-      color: white;
-      box-shadow: var(--shadow-md);
-    }
-    
-    .btn-primary:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 25px rgba(52, 152, 219, 0.3);
-    }
-    
-    .btn-primary:active {
-      transform: translateY(0);
-    }
-    
-    .btn-primary:disabled {
-      background: var(--text-light);
-      cursor: not-allowed;
-      transform: none;
-      box-shadow: var(--shadow-sm);
-    }
-    
-    .btn-loading {
-      pointer-events: none;
-    }
-    
-    .loading-spinner {
-      width: 20px;
-      height: 20px;
-      border: 2px solid rgba(255,255,255,0.3);
-      border-top: 2px solid white;
-      border-radius: 50%;
-      animation: spin 1s linear infinite;
-    }
-    
-    @keyframes spin {
-      0% { transform: rotate(0deg); }
-      100% { transform: rotate(360deg); }
-    }
-    
-    .result-section {
-      margin-top: 32px;
-      opacity: 0;
-      transform: translateY(20px);
-      transition: var(--transition);
-    }
-    
-    .result-section.show {
-      opacity: 1;
-      transform: translateY(0);
-    }
-    
-    .result-card {
-      border-radius: var(--border-radius-sm);
-      padding: 24px;
-      margin-bottom: 16px;
-      border-left: 4px solid;
-      position: relative;
-      overflow: hidden;
-    }
-    
-    .result-success {
-      background: linear-gradient(135deg, #d4edda, #c3e6cb);
-      border-color: var(--success-color);
-      color: #155724;
-    }
-    
-    .result-error {
-      background: linear-gradient(135deg, #f8d7da, #f5c6cb);
-      border-color: var(--error-color);
-      color: #721c24;
-    }
-    
-    .result-warning {
-      background: linear-gradient(135deg, #fff3cd, #ffeaa7);
-      border-color: var(--warning-color);
-      color: #856404;
-    }
-    
-    .ip-grid {
-      display: grid;
-      gap: 16px;
-      margin-top: 20px;
-    }
-    
-    .ip-item {
-      background: rgba(255,255,255,0.9);
-      border: 1px solid var(--border-color);
-      border-radius: var(--border-radius-sm);
-      padding: 20px;
-      transition: var(--transition);
-      position: relative;
-    }
-    
-    .ip-item:hover {
-      transform: translateY(-2px);
-      box-shadow: var(--shadow-md);
-    }
-    
-    .ip-status-line {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    
-    .status-icon {
-      font-size: 18px;
-      margin-left: auto;
-    }
-    
-    .copy-btn {
-      background: var(--bg-secondary);
-      border: 1px solid var(--border-color);
-      padding: 6px 12px;
-      border-radius: 6px;
-      font-size: 14px;
-      cursor: pointer;
-      transition: var(--transition);
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin: 4px 0;
-    }
-    
-    .copy-btn:hover {
-      background: var(--primary-color);
-      color: white;
-      border-color: var(--primary-color);
-    }
-    
-    .copy-btn.copied {
-      background: var(--success-color);
-      color: white;
-      border-color: var(--success-color);
-    }
-    
-    .info-tags {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-      margin-top: 8px;
-    }
-    
-    .tag {
-      padding: 4px 8px;
-      border-radius: 16px;
-      font-size: 12px;
-      font-weight: 500;
-    }
-    
-    .tag-country {
-      background: #e3f2fd;
-      color: #1976d2;
-    }
-    
-    .tag-as {
-      background: #f3e5f5;
-      color: #7b1fa2;
-    }
-    
-    .api-docs {
-      background: var(--bg-primary);
-      border-radius: var(--border-radius);
-      padding: 32px;
-      box-shadow: var(--shadow-lg);
-      animation: fadeInUp 0.8s ease-out 0.2s both;
-    }
-    
-    .section-title {
-      font-size: 1.8rem;
-      font-weight: 700;
-      color: var(--text-primary);
-      margin-bottom: 24px;
-      position: relative;
-      padding-bottom: 12px;
-    }
-    
-    .section-title::after {
-      content: "";
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      width: 60px;
-      height: 3px;
-      background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
-      border-radius: 2px;
-    }
-    
-    .code-block {
-      background: #2d3748;
-      color: #e2e8f0;
-      padding: 20px;
-      border-radius: var(--border-radius-sm);
-      font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
-      font-size: 14px;
-      overflow-x: auto;
-      margin: 16px 0;
-      border: 1px solid #4a5568;
-      position: relative;
-    }
-    
-    .code-block::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
-      background: linear-gradient(90deg, #48bb78, #38b2ac);
-    }
-    
-    .highlight {
-      color: #f56565;
-      font-weight: 600;
-    }
-    
-    .footer {
-      text-align: center;
-      padding: 20px 20px 20px;
-      color: rgba(255,255,255,0.8);
-      font-size: 14px;
-      margin-top: 40px;
-      border-top: 1px solid rgba(255,255,255,0.1);
-    }
-    
-    .github-corner {
-      position: fixed;
-      top: 0;
-      right: 0;
-      z-index: 1000;
-      transition: var(--transition);
-    }
-    
-    .github-corner:hover {
-      transform: scale(1.1);
-    }
-    
-    .github-corner svg {
-      fill: rgba(255,255,255,0.9);
-      color: var(--primary-color);
-      width: 80px;
-      height: 80px;
-      filter: drop-shadow(0 4px 8px rgba(0,0,0,0.1));
-    }
-    
-    @keyframes fadeInDown {
-      from {
-        opacity: 0;
-        transform: translateY(-30px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    
-    @keyframes fadeInUp {
-      from {
-        opacity: 0;
-        transform: translateY(30px);
-      }
-      to {
-        opacity: 1;
-        transform: translateY(0);
-      }
-    }
-    
-    @keyframes octocat-wave {
-      0%, 100% { transform: rotate(0); }
-      20%, 60% { transform: rotate(-25deg); }
-      40%, 80% { transform: rotate(10deg); }
-    }
-    
-    .github-corner:hover .octo-arm {
-      animation: octocat-wave 560ms ease-in-out;
-    }
-    
-    @media (max-width: 768px) {
-      .container {
-        padding: 16px;
-      }
-      
-      .card {
-        padding: 24px;
-        margin-bottom: 24px;
-      }
-      
-      .input-group {
-        flex-direction: column;
-        align-items: stretch;
-      }
-      
-      .input-wrapper {
-        min-width: auto;
-      }
-      
-      .btn {
-        width: 100%;
-      }
-      
-      .github-corner svg {
-        width: 60px;
-        height: 60px;
-      }
-      
-      .github-corner:hover .octo-arm {
-        animation: none;
-      }
-      
-      .github-corner .octo-arm {
-        animation: octocat-wave 560ms ease-in-out;
-      }
-      
-      .main-title {
-        font-size: 2.5rem;
-      }
-    }
-    
-    .toast {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      background: var(--text-primary);
-      color: white;
-      padding: 12px 20px;
-      border-radius: var(--border-radius-sm);
-      box-shadow: var(--shadow-lg);
-      transform: translateY(100px);
-      opacity: 0;
-      transition: var(--transition);
-      z-index: 1000;
-    }
-    
-    .toast.show {
-      transform: translateY(0);
-      opacity: 1;
-    }
-    
-    .tooltip {
-      position: relative;
-      display: inline-block;
-      cursor: help;
-    }
-    
-    .tooltip .tooltiptext {
-      visibility: hidden;
-      /* 气泡宽度 - 可调整以适应内容长度 */
-      width: 420px;
-      /* 气泡背景色 */
-      background-color: #2c3e50;
-      /* 气泡文字颜色 */
-      color: #fff;
-      /* 文字对齐方式 */
-      text-align: left;
-      /* 气泡圆角大小 */
-      border-radius: 8px;
-      /* 气泡内边距 - 上下 左右 */
-      padding: 12px 16px;
-      /* 定位方式 - fixed相对于浏览器窗口定位 */
-      position: fixed;
-      /* 层级 - 确保在最上层显示 */
-      z-index: 9999;
-      /* 垂直位置 - 50%表示距离顶部50% */
-      top: 50%;
-      /* 水平位置 - 50%表示距离左边50% */
-      left: 50%;
-      /* 居中对齐 - 向左偏移自身宽度的50%，向上偏移自身高度的50% */
-      transform: translate(-50%, -50%);
-      /* 初始透明度 */
-      opacity: 0;
-      /* 过渡动画时间 */
-      transition: opacity 0.3s;
-      /* 阴影效果 - 水平偏移 垂直偏移 模糊半径 颜色 */
-      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-      /* 字体大小 */
-      font-size: 14px;
-      /* 行高 */
-      line-height: 1.4;
-      /* 字体粗细 */
-      font-weight: 400;
-      /* 边框 */
-      border: 1px solid rgba(255,255,255,0.1);
-      /* 背景模糊效果 */
-      backdrop-filter: blur(10px);
-      /* 最大宽度 - 防止在小屏幕上超出边界 */
-      max-width: 90vw;
-      /* 最大高度 - 防止内容过多时超出屏幕 */
-      max-height: 80vh;
-      /* 内容溢出时显示滚动条 */
-      overflow-y: auto;
-    }
-    
-    .tooltip .tooltiptext::after {
-      /* 移除箭头 - 由于居中显示，箭头不再需要 */
-      display: none;
-    }
-    
-    .tooltip:hover .tooltiptext {
-      visibility: visible;
-      opacity: 1;
-    }
-    
-    @media (max-width: 768px) {
-      .tooltip .tooltiptext {
-        /* 移动端气泡宽度 */
-        width: 90vw;
-        /* 移动端最大宽度 */
-        max-width: 90vw;
-        /* 移动端字体大小 */
-        font-size: 13px;
-        /* 移动端内边距调整 */
-        padding: 10px 12px;
-      }
-    }
-  </style>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="color-scheme" content="light dark">
+	<title>Check ProxyIP</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+	<script>
+		(function () {
+			const storageKey = 'cf_proxy_theme';
+			let theme = 'dark';
+			try {
+				const storedTheme = localStorage.getItem(storageKey);
+				if (storedTheme === 'light' || storedTheme === 'dark') {
+					theme = storedTheme;
+				} else {
+					theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+				}
+			} catch (error) {
+				theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+			}
+			document.documentElement.dataset.theme = theme;
+			document.documentElement.style.colorScheme = theme;
+		})();
+	</script>
+	<style>
+		:root {
+			--bg-base: #07111d;
+			--bg-deep: #0b1726;
+			--panel: rgba(10, 24, 40, 0.78);
+			--panel-strong: rgba(15, 31, 49, 0.92);
+			--line: rgba(144, 180, 212, 0.18);
+			--text: #edf7ff;
+			--text-soft: #d4e4f3;
+			--muted: #8ea6bc;
+			--accent: #61dbff;
+			--accent-strong: #2dd4bf;
+			--accent-warm: #ffb869;
+			--success: #34d399;
+			--error: #fb7185;
+			--warning: #fbbf24;
+			--shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
+			--shadow-soft: 0 16px 44px rgba(0, 0, 0, 0.26);
+			--radius-xl: 30px;
+			--radius-lg: 24px;
+			--radius-md: 20px;
+		}
+
+		html {
+			color-scheme: dark;
+		}
+
+		html[data-theme='light'] {
+			color-scheme: light;
+			--bg-base: #eef6fb;
+			--bg-deep: #ffffff;
+			--panel: rgba(255, 255, 255, 0.72);
+			--panel-strong: rgba(255, 255, 255, 0.92);
+			--line: rgba(95, 123, 150, 0.18);
+			--text: #10253d;
+			--text-soft: #23415a;
+			--muted: #61778f;
+			--accent: #0ea5e9;
+			--accent-strong: #14b8a6;
+			--accent-warm: #f59e0b;
+			--success: #059669;
+			--error: #e11d48;
+			--warning: #d97706;
+			--shadow: 0 24px 64px rgba(43, 67, 91, 0.14);
+			--shadow-soft: 0 16px 34px rgba(43, 67, 91, 0.1);
+		}
+
+		* {
+			box-sizing: border-box;
+		}
+
+		html, body {
+			margin: 0;
+			min-height: 100%;
+		}
+
+		body {
+			font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+			color: var(--text);
+			background:
+				radial-gradient(circle at top left, rgba(45, 212, 191, 0.18), transparent 28%),
+				radial-gradient(circle at 85% 12%, rgba(97, 219, 255, 0.18), transparent 24%),
+				radial-gradient(circle at 50% 110%, rgba(255, 184, 105, 0.16), transparent 30%),
+				linear-gradient(180deg, #06101b 0%, #081321 38%, #0a1624 100%);
+			overflow-x: hidden;
+			transition: background 0.28s ease, color 0.28s ease;
+		}
+
+		body::before {
+			content: '';
+			position: fixed;
+			inset: 0;
+			pointer-events: none;
+			background-image:
+				linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+				linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+			background-size: 46px 46px;
+			mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.38), transparent 92%);
+			opacity: 0.12;
+		}
+
+		html[data-theme='light'] body {
+			background:
+				radial-gradient(circle at top left, rgba(20, 184, 166, 0.16), transparent 30%),
+				radial-gradient(circle at 88% 12%, rgba(14, 165, 233, 0.14), transparent 24%),
+				radial-gradient(circle at 50% 110%, rgba(245, 158, 11, 0.12), transparent 28%),
+				linear-gradient(180deg, #f6fbff 0%, #eef5fb 44%, #e8f1f7 100%);
+		}
+
+		html[data-theme='light'] body::before {
+			background-image:
+				linear-gradient(rgba(16, 37, 61, 0.05) 1px, transparent 1px),
+				linear-gradient(90deg, rgba(16, 37, 61, 0.05) 1px, transparent 1px);
+			mask-image: linear-gradient(180deg, rgba(255, 255, 255, 0.68), transparent 92%);
+			opacity: 0.28;
+		}
+
+		button,
+		input,
+		textarea {
+			font: inherit;
+		}
+
+		body,
+		.surface-card,
+		.input-control,
+		.history-toggle,
+		.history-dropdown,
+		.mode-card,
+		.progress-container,
+		.metric-card,
+		.results-pill,
+		.results-empty,
+		.empty-visual,
+		.guide-card,
+		.guide-flow,
+		.guide-step,
+		.guide-tip,
+		.result-item,
+		.status-badge,
+		.meta-chip,
+		.exit-ip-btn,
+		.map-container-wrapper,
+		.theme-toggle {
+			transition: background 0.28s ease, border-color 0.28s ease, color 0.28s ease, box-shadow 0.28s ease, opacity 0.28s ease;
+		}
+
+		.page-shell {
+			position: relative;
+			min-height: 100vh;
+			padding: 32px 24px 40px;
+		}
+
+		.ambient {
+			position: fixed;
+			border-radius: 999px;
+			filter: blur(80px);
+			pointer-events: none;
+			z-index: 0;
+			opacity: 0.28;
+		}
+
+		.ambient-one {
+			width: 34rem;
+			height: 34rem;
+			left: -9rem;
+			top: 10rem;
+			background: rgba(97, 219, 255, 0.22);
+		}
+
+		.ambient-two {
+			width: 28rem;
+			height: 28rem;
+			right: -6rem;
+			top: -3rem;
+			background: rgba(45, 212, 191, 0.18);
+		}
+
+		html[data-theme='light'] .ambient-one {
+			background: rgba(56, 189, 248, 0.2);
+		}
+
+		html[data-theme='light'] .ambient-two {
+			background: rgba(45, 212, 191, 0.16);
+		}
+
+		.site-header,
+		.site-main,
+		.site-footer {
+			position: relative;
+			z-index: 1;
+			max-width: 1200px;
+			margin: 0 auto;
+		}
+
+		.site-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 24px;
+			margin-bottom: 24px;
+		}
+
+		.brand {
+			display: flex;
+			flex-direction: column;
+			gap: 12px;
+		}
+
+		.brand-chip {
+			display: inline-flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 14px;
+			align-self: flex-start;
+			padding: 8px 10px 8px 14px;
+			border-radius: 999px;
+			border: 1px solid rgba(97, 219, 255, 0.16);
+			background: rgba(12, 26, 43, 0.66);
+			color: #bfeeff;
+			font-size: 0.78rem;
+			letter-spacing: 0.08em;
+			text-transform: uppercase;
+			backdrop-filter: blur(12px);
+		}
+
+		.brand-chip-text {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			min-width: 0;
+		}
+
+		.brand-dot {
+			width: 8px;
+			height: 8px;
+			border-radius: 50%;
+			background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+			box-shadow: 0 0 18px rgba(97, 219, 255, 0.7);
+		}
+
+		.brand-title {
+			font-family: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+			font-size: clamp(1.7rem, 4vw, 2.75rem);
+			font-weight: 700;
+			line-height: 0.98;
+			letter-spacing: -0.04em;
+			text-transform: uppercase;
+			color: #f7fbff;
+			text-wrap: balance;
+		}
+
+		.header-note {
+			max-width: 420px;
+			color: var(--muted);
+			line-height: 1.7;
+			text-align: right;
+			flex: 0 1 420px;
+		}
+
+		.theme-toggle {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			padding: 0;
+			border: none;
+			border-radius: 0;
+			background: transparent;
+			color: var(--text);
+			box-shadow: none;
+			backdrop-filter: none;
+			cursor: pointer;
+			min-width: 0;
+			transition: color 0.28s ease;
+		}
+
+		.theme-toggle:hover {
+			transform: none;
+		}
+
+		.theme-toggle:focus-visible {
+			outline: none;
+		}
+
+		.theme-toggle-switch {
+			position: relative;
+			width: 56px;
+			height: 30px;
+			flex: none;
+			border-radius: 999px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: linear-gradient(135deg, rgba(97, 219, 255, 0.18), rgba(45, 212, 191, 0.12));
+			box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+			transition: transform 0.2s ease, background 0.28s ease, border-color 0.28s ease, box-shadow 0.28s ease;
+		}
+
+		.theme-toggle:hover .theme-toggle-switch {
+			transform: translateY(-1px);
+			border-color: rgba(97, 219, 255, 0.2);
+			box-shadow: 0 12px 28px rgba(0, 0, 0, 0.22);
+		}
+
+		.theme-toggle:focus-visible .theme-toggle-switch {
+			box-shadow: 0 0 0 4px rgba(97, 219, 255, 0.12), 0 10px 24px rgba(0, 0, 0, 0.18);
+		}
+
+		.theme-toggle-icon {
+			position: absolute;
+			top: 9px;
+			width: 12px;
+			height: 12px;
+			color: rgba(255, 255, 255, 0.72);
+			pointer-events: none;
+		}
+
+		.theme-toggle-icon-light {
+			left: 8px;
+			color: #ffd97d;
+		}
+
+		.theme-toggle-icon-dark {
+			right: 8px;
+			color: #d9efff;
+		}
+
+		.theme-toggle-thumb {
+			position: absolute;
+			top: 3px;
+			left: 3px;
+			width: 22px;
+			height: 22px;
+			border-radius: 50%;
+			background: linear-gradient(135deg, #ffffff, #d9e9f7);
+			box-shadow: 0 6px 14px rgba(0, 0, 0, 0.24);
+			transform: translateX(28px);
+			transition: transform 0.28s ease, background 0.28s ease, box-shadow 0.28s ease;
+		}
+
+		html[data-theme='light'] .theme-toggle-thumb {
+			transform: translateX(0);
+			background: linear-gradient(135deg, #fff9d9, #ffd88a);
+			box-shadow: 0 8px 16px rgba(168, 116, 23, 0.18);
+		}
+
+		html[data-theme='light'] .theme-toggle-switch {
+			border-color: rgba(84, 112, 139, 0.14);
+			background: linear-gradient(135deg, rgba(254, 240, 138, 0.56), rgba(125, 211, 252, 0.34));
+		}
+
+		html[data-theme='light'] .theme-toggle-icon {
+			color: #53708d;
+		}
+
+		html[data-theme='light'] .theme-toggle-icon-light {
+			color: #d97706;
+		}
+
+		html[data-theme='light'] .theme-toggle-icon-dark {
+			color: #2563eb;
+		}
+
+		.surface-card {
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 36%),
+				var(--panel);
+			border: 1px solid var(--line);
+			border-radius: var(--radius-xl);
+			box-shadow: var(--shadow);
+			backdrop-filter: blur(18px);
+		}
+
+		.section-kicker {
+			display: inline-flex;
+			align-items: center;
+			gap: 10px;
+			margin: 0 0 18px;
+			font-size: 0.82rem;
+			letter-spacing: 0.14em;
+			text-transform: uppercase;
+			color: #9feaff;
+		}
+
+		.section-kicker::before {
+			content: '';
+			width: 26px;
+			height: 1px;
+			background: linear-gradient(90deg, transparent, rgba(97, 219, 255, 0.85));
+		}
+
+		.panel-copy,
+		.field-hint,
+		.summary-description,
+		.results-subtitle,
+		.empty-copy p,
+		.site-footer {
+			color: var(--muted);
+			line-height: 1.8;
+		}
+
+		.summary-description,
+		.empty-copy p {
+			margin: 0;
+		}
+
+		.workspace-grid {
+			display: grid;
+			grid-template-columns: minmax(0, 1.55fr) minmax(320px, 0.9fr);
+			gap: 24px;
+			align-items: stretch;
+			margin-top: 0;
+			position: relative;
+			z-index: 4;
+		}
+
+		.control-panel {
+			padding: 30px;
+			display: flex;
+			flex-direction: column;
+			min-height: 100%;
+			position: relative;
+			z-index: 5;
+		}
+
+		.panel-header,
+		.results-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 20px;
+		}
+
+		.panel-title,
+		.summary-title,
+		.results-title,
+		.empty-copy h3 {
+			margin: 0;
+			font-size: 1.45rem;
+			font-weight: 700;
+			letter-spacing: -0.02em;
+		}
+
+		.panel-copy {
+			margin: 10px 0 0;
+			max-width: 58ch;
+		}
+
+		.panel-badge {
+			padding: 10px 14px;
+			border-radius: 999px;
+			background: rgba(97, 219, 255, 0.08);
+			border: 1px solid rgba(97, 219, 255, 0.16);
+			color: #c6f5ff;
+			font-size: 0.82rem;
+			white-space: nowrap;
+		}
+
+		.input-zone {
+			margin-top: 24px;
+		}
+
+		.field-label {
+			display: block;
+			margin-bottom: 12px;
+			font-size: 0.9rem;
+			font-weight: 600;
+			color: #d9efff;
+		}
+
+		.input-wrapper {
+			position: relative;
+		}
+
+		.input-control {
+			width: 100%;
+			padding: 18px 64px 18px 20px;
+			border: 1px solid var(--line);
+			border-radius: 22px;
+			background: rgba(4, 14, 24, 0.52);
+			color: var(--text);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+			transition: border-color 0.24s ease, box-shadow 0.24s ease, background 0.24s ease;
+		}
+
+		.input-control::placeholder {
+			color: #7390a9;
+		}
+
+		.input-control:focus {
+			outline: none;
+			background: rgba(5, 18, 29, 0.74);
+			border-color: rgba(97, 219, 255, 0.34);
+			box-shadow: 0 0 0 4px rgba(97, 219, 255, 0.08);
+		}
+
+		textarea.input-control {
+			min-height: 188px;
+			resize: vertical;
+			padding-right: 20px;
+			line-height: 1.75;
+		}
+
+		.field-hint {
+			margin: 12px 0 0;
+			font-size: 0.9rem;
+		}
+
+		.history-toggle {
+			position: absolute;
+			right: 16px;
+			top: 50%;
+			transform: translateY(-50%);
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			width: 38px;
+			height: 38px;
+			border-radius: 14px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: rgba(255, 255, 255, 0.03);
+			color: #b1c7db;
+			cursor: pointer;
+			transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+		}
+
+		.history-toggle:hover {
+			color: #f7fbff;
+			background: rgba(97, 219, 255, 0.08);
+			transform: translateY(calc(-50% - 1px));
+		}
+
+		.history-dropdown {
+			position: absolute;
+			top: calc(100% + 10px);
+			left: 0;
+			right: 0;
+			display: none;
+			padding: 8px;
+			border-radius: 20px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: rgba(8, 19, 32, 0.96);
+			box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+			max-height: 280px;
+			overflow-y: auto;
+			z-index: 80;
+		}
+
+		.history-item {
+			width: 100%;
+			padding: 13px 14px;
+			border: none;
+			background: transparent;
+			border-radius: 14px;
+			color: var(--text-soft);
+			text-align: left;
+			cursor: pointer;
+			transition: background 0.2s ease, color 0.2s ease;
+		}
+
+		.history-item:hover {
+			background: rgba(97, 219, 255, 0.08);
+			color: #ffffff;
+		}
+
+		.history-item.is-empty {
+			color: #69839a;
+			cursor: default;
+		}
+
+		.control-row {
+			display: flex;
+			gap: 16px;
+			align-items: stretch;
+			margin-top: 18px;
+		}
+
+		.mode-card {
+			min-width: 238px;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 16px;
+			padding: 18px 18px 18px 20px;
+			border-radius: 22px;
+			background: rgba(255, 255, 255, 0.03);
+			border: 1px solid rgba(255, 255, 255, 0.07);
+		}
+
+		.mode-copy strong {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 0.98rem;
+		}
+
+		.mode-state {
+			font-size: 0.88rem;
+			color: var(--muted);
+		}
+
+		.switch {
+			position: relative;
+			display: inline-block;
+			width: 54px;
+			height: 30px;
+			flex: none;
+		}
+
+		.switch input {
+			opacity: 0;
+			width: 0;
+			height: 0;
+		}
+
+		.slider {
+			position: absolute;
+			inset: 0;
+			cursor: pointer;
+			border-radius: 999px;
+			background: rgba(255, 255, 255, 0.12);
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			transition: 0.28s ease;
+		}
+
+		.slider::before {
+			content: '';
+			position: absolute;
+			width: 22px;
+			height: 22px;
+			left: 3px;
+			top: 3px;
+			border-radius: 50%;
+			background: #ffffff;
+			box-shadow: 0 6px 18px rgba(0, 0, 0, 0.24);
+			transition: 0.28s ease;
+		}
+
+		.switch input:checked + .slider {
+			background: linear-gradient(135deg, rgba(97, 219, 255, 0.92), rgba(45, 212, 191, 0.84));
+			border-color: transparent;
+		}
+
+		.switch input:checked + .slider::before {
+			transform: translateX(24px);
+		}
+
+		.primary-btn {
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 4px;
+			border: none;
+			padding: 16px 20px;
+			border-radius: 22px;
+			background: linear-gradient(135deg, var(--accent), #8cf2ff 52%, var(--accent-warm));
+			color: #052538;
+			font-weight: 800;
+			cursor: pointer;
+			box-shadow: 0 18px 34px rgba(97, 219, 255, 0.28);
+			transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
+		}
+
+		.primary-btn small {
+			color: rgba(5, 37, 56, 0.78);
+			font-size: 0.8rem;
+			font-weight: 700;
+			letter-spacing: 0.06em;
+			text-transform: uppercase;
+		}
+
+		.primary-btn:hover {
+			transform: translateY(-2px);
+			box-shadow: 0 24px 42px rgba(97, 219, 255, 0.34);
+		}
+
+		.primary-btn:disabled {
+			cursor: wait;
+			transform: none;
+			opacity: 0.74;
+			box-shadow: 0 14px 26px rgba(97, 219, 255, 0.18);
+		}
+
+		.progress-container {
+			display: grid;
+			gap: 10px;
+			margin-top: 18px;
+			padding: 16px;
+			border-radius: 22px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015)),
+				rgba(255, 255, 255, 0.03);
+		}
+
+		.progress-head {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			gap: 12px;
+			font-size: 0.92rem;
+			color: var(--text-soft);
+		}
+
+		.progress-track {
+			position: relative;
+			height: 12px;
+			border-radius: 999px;
+			overflow: hidden;
+			background: rgba(255, 255, 255, 0.08);
+		}
+
+		.progress-bar {
+			width: 0%;
+			height: 100%;
+			border-radius: inherit;
+			background: linear-gradient(90deg, var(--accent), var(--accent-strong), var(--accent-warm));
+			transition: width 0.32s ease;
+		}
+
+		.side-column {
+			display: grid;
+			gap: 24px;
+			min-height: 100%;
+		}
+
+		.side-card {
+			padding: 26px;
+			min-height: 100%;
+		}
+
+		.summary-description {
+			margin-top: 10px;
+		}
+
+		.summary-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 12px;
+			margin-top: 14px;
+		}
+
+		.metric-card {
+			padding: 16px;
+			border-radius: 18px;
+			background: rgba(255, 255, 255, 0.03);
+			border: 1px solid rgba(255, 255, 255, 0.06);
+		}
+
+		.metric-card span {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 0.82rem;
+			color: var(--muted);
+		}
+
+		.metric-card strong {
+			font-family: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+			font-size: 1.65rem;
+			letter-spacing: -0.04em;
+		}
+
+		.results-shell {
+			margin-top: 24px;
+			padding: 28px;
+			position: relative;
+			z-index: 1;
+		}
+
+		.results-subtitle {
+			margin: 10px 0 0;
+		}
+
+		.results-pill {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			padding: 10px 14px;
+			border-radius: 999px;
+			font-size: 0.82rem;
+			font-weight: 700;
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			background: rgba(255, 255, 255, 0.04);
+			color: #e8f5ff;
+			white-space: nowrap;
+		}
+
+		.results-pill.state-idle {
+			color: #d5e6f6;
+		}
+
+		.results-pill.state-resolving {
+			background: rgba(251, 191, 36, 0.12);
+			border-color: rgba(251, 191, 36, 0.22);
+			color: #ffd97d;
+		}
+
+		.results-pill.state-running {
+			background: rgba(97, 219, 255, 0.12);
+			border-color: rgba(97, 219, 255, 0.24);
+			color: #bff4ff;
+		}
+
+		.results-pill.state-done {
+			background: rgba(52, 211, 153, 0.12);
+			border-color: rgba(52, 211, 153, 0.24);
+			color: #abffd8;
+		}
+
+		.results-pill.state-empty,
+		.results-pill.state-error {
+			background: rgba(251, 113, 133, 0.1);
+			border-color: rgba(251, 113, 133, 0.22);
+			color: #ffc4d0;
+		}
+
+		.results-empty {
+			display: grid;
+			grid-template-columns: auto 1fr;
+			gap: 18px;
+			align-items: center;
+			padding: 24px;
+			margin-top: 22px;
+			margin-bottom: 18px;
+			border-radius: 24px;
+			border: 1px dashed rgba(144, 180, 212, 0.22);
+			background: rgba(255, 255, 255, 0.025);
+		}
+
+		.empty-visual {
+			position: relative;
+			width: 90px;
+			height: 90px;
+			border-radius: 26px;
+			background:
+				radial-gradient(circle at 30% 30%, rgba(97, 219, 255, 0.26), transparent 42%),
+				linear-gradient(160deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.015));
+			border: 1px solid rgba(255, 255, 255, 0.06);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+		}
+
+		.empty-visual span {
+			position: absolute;
+			border-radius: 999px;
+		}
+
+		.empty-visual span:nth-child(1) {
+			width: 44px;
+			height: 44px;
+			left: 10px;
+			top: 14px;
+			background: rgba(97, 219, 255, 0.24);
+		}
+
+		.empty-visual span:nth-child(2) {
+			width: 18px;
+			height: 18px;
+			right: 18px;
+			top: 18px;
+			background: rgba(45, 212, 191, 0.48);
+		}
+
+		.empty-visual span:nth-child(3) {
+			width: 56px;
+			height: 10px;
+			left: 18px;
+			bottom: 18px;
+			background: rgba(255, 255, 255, 0.12);
+		}
+
+		.results-list {
+			display: grid;
+			gap: 16px;
+		}
+
+		.guide-shell {
+			margin-top: 24px;
+			padding: 28px;
+			position: relative;
+			overflow: hidden;
+			z-index: 1;
+		}
+
+		.guide-shell::before {
+			content: '';
+			position: absolute;
+			inset: 0;
+			background:
+				radial-gradient(circle at top right, rgba(97, 219, 255, 0.14), transparent 30%),
+				radial-gradient(circle at bottom left, rgba(45, 212, 191, 0.12), transparent 28%);
+			pointer-events: none;
+		}
+
+		.guide-header,
+		.guide-grid,
+		.guide-flow,
+		.guide-tip {
+			position: relative;
+			z-index: 1;
+		}
+
+		.guide-header {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 20px;
+		}
+
+		.guide-badge {
+			display: inline-flex;
+			align-items: center;
+			align-self: flex-start;
+			padding: 10px 14px;
+			border-radius: 999px;
+			background: rgba(97, 219, 255, 0.08);
+			border: 1px solid rgba(97, 219, 255, 0.16);
+			color: #c6f5ff;
+			font-size: 0.82rem;
+			font-weight: 600;
+			white-space: nowrap;
+		}
+
+		.guide-grid {
+			display: grid;
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 16px;
+			margin-top: 24px;
+		}
+
+		.guide-grid-secondary {
+			margin-top: 18px;
+		}
+
+		.guide-card {
+			padding: 24px;
+			border-radius: 26px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 44%),
+				rgba(8, 20, 34, 0.6);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+		}
+
+		.guide-card-accent {
+			background:
+				radial-gradient(circle at top left, rgba(97, 219, 255, 0.16), transparent 38%),
+				linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 46%),
+				rgba(9, 22, 37, 0.68);
+		}
+
+		.guide-card-warm {
+			background:
+				radial-gradient(circle at top right, rgba(255, 184, 105, 0.16), transparent 34%),
+				linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 46%),
+				rgba(14, 23, 35, 0.72);
+		}
+
+		.guide-card-label {
+			display: inline-flex;
+			align-items: center;
+			gap: 8px;
+			margin-bottom: 14px;
+			font-size: 0.74rem;
+			font-weight: 700;
+			letter-spacing: 0.14em;
+			text-transform: uppercase;
+			color: #9feaff;
+		}
+
+		.guide-card-label::before {
+			content: '';
+			width: 18px;
+			height: 1px;
+			background: rgba(97, 219, 255, 0.72);
+		}
+
+		.guide-card h3 {
+			margin: 0;
+			font-size: 1.18rem;
+			line-height: 1.4;
+			letter-spacing: -0.02em;
+		}
+
+		.guide-card p {
+			margin: 14px 0 0;
+			color: var(--muted);
+			line-height: 1.8;
+		}
+
+		.guide-card a {
+			color: #bff4ff;
+			text-decoration: none;
+			border-bottom: 1px solid rgba(191, 244, 255, 0.26);
+		}
+
+		.guide-card a:hover {
+			color: #ffffff;
+			border-bottom-color: rgba(255, 255, 255, 0.42);
+		}
+
+		.guide-quote {
+			margin-top: 16px;
+			padding: 14px 16px;
+			border-radius: 20px;
+			border: 1px solid rgba(251, 191, 36, 0.18);
+			background: rgba(251, 191, 36, 0.1);
+			color: #ffe7a7;
+			font-family: 'Space Grotesk', 'Plus Jakarta Sans', sans-serif;
+			line-height: 1.6;
+		}
+
+		.guide-flow {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+			gap: 14px;
+			align-items: center;
+			margin-top: 18px;
+			padding: 24px;
+			border-radius: 28px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 60%),
+				rgba(255, 255, 255, 0.03);
+		}
+
+		.guide-step {
+			padding: 18px 16px;
+			border-radius: 22px;
+			text-align: center;
+			border: 1px solid rgba(255, 255, 255, 0.07);
+			background: rgba(255, 255, 255, 0.03);
+		}
+
+		.guide-step strong {
+			display: block;
+			font-size: 1rem;
+			letter-spacing: -0.02em;
+		}
+
+		.guide-step span {
+			display: block;
+			margin-top: 8px;
+			font-size: 0.9rem;
+			color: var(--muted);
+			line-height: 1.65;
+		}
+
+		.guide-step.is-source strong {
+			color: #91ecff;
+		}
+
+		.guide-step.is-proxy strong {
+			color: #8ef5d9;
+		}
+
+		.guide-step.is-target strong {
+			color: #ffd08b;
+		}
+
+		.guide-arrow {
+			font-size: 1.5rem;
+			font-weight: 700;
+			color: rgba(97, 219, 255, 0.82);
+		}
+
+		.guide-flow-caption {
+			grid-column: 1 / -1;
+			margin: 2px 0 0;
+			text-align: center;
+			color: var(--muted);
+			line-height: 1.8;
+		}
+
+		.guide-list {
+			margin: 14px 0 0;
+			padding-left: 20px;
+			color: var(--text-soft);
+			line-height: 1.8;
+		}
+
+		.guide-list li + li {
+			margin-top: 8px;
+		}
+
+		.guide-list li::marker {
+			color: var(--accent-strong);
+		}
+
+		.guide-tip {
+			margin-top: 18px;
+			padding: 18px 20px;
+			border-radius: 22px;
+			border: 1px solid rgba(97, 219, 255, 0.16);
+			background:
+				linear-gradient(90deg, rgba(97, 219, 255, 0.1), rgba(45, 212, 191, 0.08), rgba(255, 184, 105, 0.08)),
+				rgba(255, 255, 255, 0.02);
+			color: #d7edf9;
+			line-height: 1.8;
+		}
+
+		.guide-tip strong {
+			color: #ffffff;
+		}
+
+		.result-item {
+			position: relative;
+			overflow: hidden;
+			padding: 20px 22px;
+			border-radius: 26px;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 38%),
+				var(--panel-strong);
+			box-shadow: var(--shadow-soft);
+		}
+
+		.result-item > * {
+			position: relative;
+			z-index: 1;
+		}
+
+		.result-item::before {
+			content: '';
+			position: absolute;
+			top: 0;
+			left: 0;
+			bottom: 0;
+			width: 4px;
+			background: rgba(147, 168, 189, 0.5);
+		}
+
+		.result-item.success::before {
+			background: linear-gradient(180deg, #34d399, #10b981);
+		}
+
+		.result-item.error::before {
+			background: linear-gradient(180deg, #fb7185, #ef4444);
+		}
+
+		.result-flag-overlay {
+			position: absolute;
+			top: 58px;
+			right: -16px;
+			width: 168px;
+			height: 112px;
+			border-radius: 28px;
+			background-position: center;
+			background-repeat: no-repeat;
+			background-size: cover;
+			opacity: 0;
+			filter: blur(13px) saturate(1.08);
+			transform: rotate(7deg) scale(1.18);
+			transform-origin: top right;
+			pointer-events: none;
+			z-index: 0;
+			transition: opacity 0.24s ease;
+		}
+
+		.result-item.success.has-flag .result-flag-overlay {
+			opacity: 0.22;
+		}
+
+		.result-top {
+			display: flex;
+			justify-content: space-between;
+			align-items: flex-start;
+			gap: 16px;
+		}
+
+		.result-info {
+			display: flex;
+			flex-direction: column;
+			gap: 6px;
+			min-width: 0;
+		}
+
+		.result-label {
+			font-size: 0.74rem;
+			letter-spacing: 0.14em;
+			text-transform: uppercase;
+			color: var(--muted);
+		}
+
+		.result-ip {
+			font-family: 'Space Grotesk', 'Plus Jakarta Sans', monospace;
+			font-size: 1.08rem;
+			font-weight: 700;
+			word-break: break-word;
+		}
+
+		.result-detail {
+			color: var(--muted);
+			font-size: 0.94rem;
+			line-height: 1.75;
+		}
+
+		.result-detail.is-compact {
+			font-size: 0.88rem;
+		}
+
+		.status-badge {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			min-width: 78px;
+			padding: 10px 14px;
+			border-radius: 999px;
+			border: 1px solid rgba(255, 255, 255, 0.1);
+			background: rgba(255, 255, 255, 0.04);
+			font-size: 0.82rem;
+			font-weight: 700;
+			color: #eef8ff;
+			white-space: nowrap;
+		}
+
+		.status-success {
+			background: rgba(52, 211, 153, 0.12);
+			border-color: rgba(52, 211, 153, 0.24);
+			color: #a5f3cf;
+		}
+
+		.status-error {
+			background: rgba(251, 113, 133, 0.12);
+			border-color: rgba(251, 113, 133, 0.24);
+			color: #fecdd7;
+		}
+
+		.status-pending {
+			background: rgba(251, 191, 36, 0.12);
+			border-color: rgba(251, 191, 36, 0.22);
+			color: #fde68a;
+		}
+
+		.result-meta {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-top: 14px;
+		}
+
+		.meta-chip {
+			display: inline-flex;
+			align-items: center;
+			padding: 8px 12px;
+			border-radius: 999px;
+			background: rgba(97, 219, 255, 0.07);
+			border: 1px solid rgba(97, 219, 255, 0.12);
+			color: var(--text-soft);
+			font-size: 0.82rem;
+		}
+
+		.meta-chip-strong {
+			background: rgba(97, 219, 255, 0.12);
+			border-color: rgba(97, 219, 255, 0.22);
+			color: #dff9ff;
+		}
+
+		.meta-chip-danger {
+			background: rgba(251, 113, 133, 0.1);
+			border-color: rgba(251, 113, 133, 0.22);
+			color: #ffd1d8;
+		}
+
+		.exit-list {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 10px;
+			margin-top: 14px;
+			align-items: center;
+		}
+
+		.exit-list-label {
+			color: var(--muted);
+			font-size: 0.84rem;
+		}
+
+		.exit-ip-btn {
+			border: 1px solid rgba(52, 211, 153, 0.22);
+			border-radius: 999px;
+			padding: 10px 14px;
+			background: linear-gradient(135deg, rgba(52, 211, 153, 0.14), rgba(97, 219, 255, 0.08));
+			color: var(--text);
+			font-weight: 700;
+			cursor: pointer;
+			transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+		}
+
+		.exit-ip-btn:hover {
+			transform: translateY(-1px);
+			border-color: rgba(97, 219, 255, 0.32);
+			background: linear-gradient(135deg, rgba(52, 211, 153, 0.18), rgba(97, 219, 255, 0.12));
+		}
+
+		.exit-ip-btn.is-active {
+			border-color: rgba(97, 219, 255, 0.52);
+			background: linear-gradient(135deg, rgba(97, 219, 255, 0.26), rgba(52, 211, 153, 0.16));
+			box-shadow: inset 0 0 0 1px rgba(97, 219, 255, 0.14), 0 0 0 1px rgba(97, 219, 255, 0.1);
+		}
+
+		.map-container-wrapper {
+			display: none;
+			margin-top: 16px;
+			height: 330px;
+			border-radius: 22px;
+			overflow: hidden;
+			border: 1px solid rgba(255, 255, 255, 0.08);
+			background: rgba(255, 255, 255, 0.03);
+		}
+
+		#map-template {
+			display: none;
+		}
+
+		#global-map {
+			width: 100%;
+			height: 100%;
+			background: #09111d;
+		}
+
+		#global-map .leaflet-tile-pane {
+			filter: invert(1) hue-rotate(180deg) brightness(0.92) contrast(0.96) saturate(0.88);
+		}
+
+		.map-popup {
+			font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+			font-size: 0.88rem;
+			line-height: 1.65;
+			color: #10253d;
+		}
+
+		.map-popup b {
+			color: #081826;
+		}
+
+		.leaflet-control-attribution,
+		.leaflet-control-zoom {
+			display: none !important;
+		}
+
+		.site-footer {
+			padding-top: 22px;
+			font-size: 0.9rem;
+		}
+
+		.site-footer a {
+			color: #bff4ff;
+			text-decoration: none;
+			border-bottom: 1px solid rgba(191, 244, 255, 0.28);
+		}
+
+		.site-footer a:hover {
+			color: #ffffff;
+			border-bottom-color: rgba(255, 255, 255, 0.42);
+		}
+
+		html[data-theme='light'] .brand-chip {
+			border-color: rgba(86, 124, 158, 0.18);
+			background: rgba(255, 255, 255, 0.76);
+			color: #1d5d83;
+		}
+
+		html[data-theme='light'] .brand-title {
+			color: #10253d;
+		}
+
+		html[data-theme='light'] .theme-toggle {
+			background: transparent;
+			border-color: transparent;
+			box-shadow: none;
+		}
+
+		html[data-theme='light'] .surface-card {
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.72)),
+				var(--panel);
+		}
+
+		html[data-theme='light'] .section-kicker,
+		html[data-theme='light'] .guide-card-label {
+			color: #0f7ab8;
+		}
+
+		html[data-theme='light'] .section-kicker::before,
+		html[data-theme='light'] .guide-card-label::before {
+			background: linear-gradient(90deg, transparent, rgba(14, 165, 233, 0.72));
+		}
+
+		html[data-theme='light'] .panel-badge,
+		html[data-theme='light'] .guide-badge {
+			background: rgba(14, 165, 233, 0.08);
+			border-color: rgba(14, 165, 233, 0.16);
+			color: #0f5f8e;
+		}
+
+		html[data-theme='light'] .field-label {
+			color: #17324a;
+		}
+
+		html[data-theme='light'] .input-control {
+			background: rgba(255, 255, 255, 0.82);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+		}
+
+		html[data-theme='light'] .input-control::placeholder {
+			color: #7b8fa3;
+		}
+
+		html[data-theme='light'] .input-control:focus {
+			background: #ffffff;
+			border-color: rgba(14, 165, 233, 0.3);
+			box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.1);
+		}
+
+		html[data-theme='light'] .history-toggle {
+			border-color: rgba(95, 123, 150, 0.14);
+			background: rgba(255, 255, 255, 0.78);
+			color: #5b738b;
+		}
+
+		html[data-theme='light'] .history-toggle:hover {
+			color: #10253d;
+			background: rgba(14, 165, 233, 0.1);
+		}
+
+		html[data-theme='light'] .history-dropdown {
+			border-color: rgba(95, 123, 150, 0.14);
+			background: rgba(255, 255, 255, 0.96);
+			box-shadow: 0 20px 36px rgba(43, 67, 91, 0.16);
+		}
+
+		html[data-theme='light'] .history-item:hover {
+			background: rgba(14, 165, 233, 0.08);
+			color: #10253d;
+		}
+
+		html[data-theme='light'] .history-item.is-empty {
+			color: #7f92a6;
+		}
+
+		html[data-theme='light'] .mode-card,
+		html[data-theme='light'] .progress-container,
+		html[data-theme='light'] .metric-card,
+		html[data-theme='light'] .results-empty,
+		html[data-theme='light'] .guide-flow,
+		html[data-theme='light'] .guide-step,
+		html[data-theme='light'] .map-container-wrapper {
+			background: rgba(255, 255, 255, 0.62);
+			border-color: rgba(95, 123, 150, 0.14);
+		}
+
+		html[data-theme='light'] .slider {
+			background: rgba(14, 165, 233, 0.12);
+			border-color: rgba(95, 123, 150, 0.14);
+		}
+
+		html[data-theme='light'] .slider::before {
+			background: #ffffff;
+			box-shadow: 0 6px 14px rgba(43, 67, 91, 0.18);
+		}
+
+		html[data-theme='light'] .primary-btn {
+			box-shadow: 0 18px 34px rgba(14, 165, 233, 0.18);
+		}
+
+		html[data-theme='light'] .primary-btn:hover {
+			box-shadow: 0 22px 40px rgba(14, 165, 233, 0.22);
+		}
+
+		html[data-theme='light'] .results-pill {
+			border-color: rgba(95, 123, 150, 0.16);
+			background: rgba(255, 255, 255, 0.72);
+			color: #16324a;
+		}
+
+		html[data-theme='light'] .results-pill.state-idle {
+			color: #365168;
+		}
+
+		html[data-theme='light'] .results-pill.state-resolving {
+			background: rgba(245, 158, 11, 0.12);
+			border-color: rgba(245, 158, 11, 0.18);
+			color: #9a6706;
+		}
+
+		html[data-theme='light'] .results-pill.state-running {
+			background: rgba(14, 165, 233, 0.12);
+			border-color: rgba(14, 165, 233, 0.18);
+			color: #0f5f8e;
+		}
+
+		html[data-theme='light'] .results-pill.state-done {
+			background: rgba(5, 150, 105, 0.12);
+			border-color: rgba(5, 150, 105, 0.18);
+			color: #047857;
+		}
+
+		html[data-theme='light'] .results-pill.state-empty,
+		html[data-theme='light'] .results-pill.state-error {
+			background: rgba(225, 29, 72, 0.1);
+			border-color: rgba(225, 29, 72, 0.16);
+			color: #be123c;
+		}
+
+		html[data-theme='light'] .empty-visual {
+			background:
+				radial-gradient(circle at 30% 30%, rgba(14, 165, 233, 0.18), transparent 42%),
+				linear-gradient(160deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0.4));
+			border-color: rgba(95, 123, 150, 0.14);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82);
+		}
+
+		html[data-theme='light'] .empty-visual span:nth-child(1) {
+			background: rgba(14, 165, 233, 0.18);
+		}
+
+		html[data-theme='light'] .empty-visual span:nth-child(2) {
+			background: rgba(20, 184, 166, 0.28);
+		}
+
+		html[data-theme='light'] .empty-visual span:nth-child(3) {
+			background: rgba(16, 37, 61, 0.12);
+		}
+
+		html[data-theme='light'] .guide-shell::before {
+			background:
+				radial-gradient(circle at top right, rgba(14, 165, 233, 0.1), transparent 30%),
+				radial-gradient(circle at bottom left, rgba(20, 184, 166, 0.08), transparent 28%);
+		}
+
+		html[data-theme='light'] .guide-card {
+			border-color: rgba(95, 123, 150, 0.14);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(255, 255, 255, 0.56)),
+				rgba(255, 255, 255, 0.74);
+			box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8);
+		}
+
+		html[data-theme='light'] .guide-card-accent {
+			background:
+				radial-gradient(circle at top left, rgba(14, 165, 233, 0.12), transparent 38%),
+				linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.56)),
+				rgba(255, 255, 255, 0.78);
+		}
+
+		html[data-theme='light'] .guide-card-warm {
+			background:
+				radial-gradient(circle at top right, rgba(245, 158, 11, 0.12), transparent 34%),
+				linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.56)),
+				rgba(255, 255, 255, 0.78);
+		}
+
+		html[data-theme='light'] .guide-card a,
+		html[data-theme='light'] .site-footer a {
+			color: #0f7ab8;
+			border-bottom-color: rgba(14, 165, 233, 0.24);
+		}
+
+		html[data-theme='light'] .guide-card a:hover,
+		html[data-theme='light'] .site-footer a:hover {
+			color: #10253d;
+			border-bottom-color: rgba(16, 37, 61, 0.2);
+		}
+
+		html[data-theme='light'] .guide-quote {
+			border-color: rgba(245, 158, 11, 0.16);
+			background: rgba(245, 158, 11, 0.08);
+			color: #9a6706;
+		}
+
+		html[data-theme='light'] .guide-step.is-source strong {
+			color: #0284c7;
+		}
+
+		html[data-theme='light'] .guide-step.is-proxy strong {
+			color: #0f766e;
+		}
+
+		html[data-theme='light'] .guide-step.is-target strong {
+			color: #b45309;
+		}
+
+		html[data-theme='light'] .guide-arrow {
+			color: rgba(14, 165, 233, 0.56);
+		}
+
+		html[data-theme='light'] .guide-tip {
+			border-color: rgba(14, 165, 233, 0.14);
+			background:
+				linear-gradient(90deg, rgba(14, 165, 233, 0.08), rgba(20, 184, 166, 0.06), rgba(245, 158, 11, 0.06)),
+				rgba(255, 255, 255, 0.62);
+			color: #365168;
+		}
+
+		html[data-theme='light'] .guide-tip strong {
+			color: #10253d;
+		}
+
+		html[data-theme='light'] .result-item {
+			border-color: rgba(95, 123, 150, 0.14);
+			background:
+				linear-gradient(180deg, rgba(255, 255, 255, 0.88), transparent 38%),
+				var(--panel-strong);
+		}
+
+		html[data-theme='light'] .result-item::before {
+			background: rgba(121, 140, 159, 0.38);
+		}
+
+		html[data-theme='light'] .status-badge {
+			border-color: rgba(95, 123, 150, 0.14);
+			background: rgba(255, 255, 255, 0.72);
+			color: #16324a;
+		}
+
+		html[data-theme='light'] .status-success {
+			background: rgba(5, 150, 105, 0.12);
+			border-color: rgba(5, 150, 105, 0.16);
+			color: #047857;
+		}
+
+		html[data-theme='light'] .status-error {
+			background: rgba(225, 29, 72, 0.1);
+			border-color: rgba(225, 29, 72, 0.16);
+			color: #be123c;
+		}
+
+		html[data-theme='light'] .status-pending {
+			background: rgba(245, 158, 11, 0.12);
+			border-color: rgba(245, 158, 11, 0.16);
+			color: #9a6706;
+		}
+
+		html[data-theme='light'] .meta-chip {
+			background: rgba(14, 165, 233, 0.08);
+			border-color: rgba(14, 165, 233, 0.12);
+			color: #23415a;
+		}
+
+		html[data-theme='light'] .meta-chip-strong {
+			background: rgba(14, 165, 233, 0.12);
+			border-color: rgba(14, 165, 233, 0.18);
+			color: #075985;
+		}
+
+		html[data-theme='light'] .meta-chip-danger {
+			background: rgba(225, 29, 72, 0.08);
+			border-color: rgba(225, 29, 72, 0.14);
+			color: #be123c;
+		}
+
+		html[data-theme='light'] .exit-ip-btn {
+			border-color: rgba(5, 150, 105, 0.18);
+			background: linear-gradient(135deg, rgba(5, 150, 105, 0.08), rgba(14, 165, 233, 0.08));
+			color: #17324a;
+		}
+
+		html[data-theme='light'] .exit-ip-btn:hover {
+			border-color: rgba(14, 165, 233, 0.24);
+			background: linear-gradient(135deg, rgba(5, 150, 105, 0.12), rgba(14, 165, 233, 0.12));
+		}
+
+		html[data-theme='light'] .exit-ip-btn.is-active {
+			border-color: rgba(14, 165, 233, 0.32);
+			background: linear-gradient(135deg, rgba(14, 165, 233, 0.18), rgba(5, 150, 105, 0.12));
+			box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.1), 0 0 0 1px rgba(14, 165, 233, 0.08);
+		}
+
+		html[data-theme='light'] #global-map {
+			background: #dfeaf3;
+		}
+
+		html[data-theme='light'] #global-map .leaflet-tile-pane {
+			filter: none;
+		}
+
+		@media (max-width: 980px) {
+			.workspace-grid {
+				grid-template-columns: 1fr;
+			}
+
+			.header-note {
+				text-align: left;
+				max-width: none;
+			}
+
+			.guide-grid {
+				grid-template-columns: 1fr;
+			}
+
+		}
+
+		@media (max-width: 720px) {
+			.page-shell {
+				padding: 22px 14px 32px;
+			}
+
+			.site-header,
+			.panel-header,
+			.results-header,
+			.guide-header,
+			.control-row,
+			.results-empty,
+			.result-top {
+				flex-direction: column;
+			}
+
+			.site-header,
+			.panel-header,
+			.results-header,
+			.guide-header,
+			.control-row {
+				align-items: stretch;
+			}
+
+			.control-panel,
+			.side-card,
+			.results-shell,
+			.guide-shell {
+				padding: 22px;
+			}
+
+			.mode-card {
+				min-width: 0;
+			}
+
+			.progress-head {
+				flex-direction: column;
+				align-items: flex-start;
+			}
+
+			.guide-flow {
+				grid-template-columns: 1fr;
+				padding: 20px;
+			}
+
+			.guide-arrow {
+				display: none;
+			}
+		}
+
+		@media (max-width: 560px) {
+			.meta-chip,
+			.exit-ip-btn {
+				width: 100%;
+				justify-content: center;
+			}
+
+			.results-empty {
+				grid-template-columns: 1fr;
+				text-align: center;
+			}
+
+			.empty-visual {
+				margin: 0 auto;
+			}
+
+			.summary-grid {
+				grid-template-columns: repeat(2, minmax(0, 1fr));
+				gap: 10px;
+			}
+
+			.metric-card {
+				padding: 14px;
+			}
+		}
+	</style>
 </head>
 <body>
-  <a href="https://github.com/cmliu/CF-Workers-CheckProxyIP" target="_blank" class="github-corner" aria-label="View source on Github">
-    <svg viewBox="0 0 250 250" aria-hidden="true">
-      <path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path>
-      <path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path>
-      <path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path>
-    </svg>
-  </a>
+	<div class="page-shell">
+		<div class="ambient ambient-one"></div>
+		<div class="ambient ambient-two"></div>
 
-  <div class="container">
-    <header class="header">
-      <h1 class="main-title">Check ProxyIP</h1>
-    </header>
+		<header class="site-header">
+			<div class="brand">
+				<div class="brand-title">Check ProxyIP</div>
+				<div class="brand-chip">
+					<span class="brand-chip-text">
+						<span class="brand-dot"></span>
+						<span>Cloudflare Workers Toolkit</span>
+					</span>
+					<button class="theme-toggle" type="button" id="themeToggle" aria-label="切换日间和夜间模式" title="切换日间和夜间模式">
+						<span class="theme-toggle-switch" aria-hidden="true">
+							<svg class="theme-toggle-icon theme-toggle-icon-light" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<circle cx="12" cy="12" r="4"></circle>
+								<path d="M12 2v2"></path>
+								<path d="M12 20v2"></path>
+								<path d="m4.93 4.93 1.41 1.41"></path>
+								<path d="m17.66 17.66 1.41 1.41"></path>
+								<path d="M2 12h2"></path>
+								<path d="M20 12h2"></path>
+								<path d="m6.34 17.66-1.41 1.41"></path>
+								<path d="m19.07 4.93-1.41 1.41"></path>
+							</svg>
+							<span class="theme-toggle-thumb"></span>
+							<svg class="theme-toggle-icon theme-toggle-icon-dark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+								<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9z"></path>
+							</svg>
+						</span>
+					</button>
+				</div>
+			</div>
+			<div class="header-note">基于 Cloudflare 的 ProxyIP 检测工具，支持单个或批量目标解析、可用性验证与出口信息查看。</div>
+		</header>
 
-    <div class="card">
-      <div class="form-section">
-        <label for="proxyip" class="form-label">🔍 输入 ProxyIP 地址</label>
-        <div class="input-group">
-          <div class="input-wrapper">
-            <input type="text" id="proxyip" class="form-input" placeholder="例如: 1.2.3.4:443 或 example.com" autocomplete="off">
-          </div>
-          <button id="checkBtn" class="btn btn-primary" onclick="checkProxyIP()">
-            <span class="btn-text">检测</span>
-            <div class="loading-spinner" style="display: none;"></div>
-          </button>
-        </div>
-      </div>
-      
-      <div id="result" class="result-section"></div>
-    </div>
-    
-    <div class="api-docs">
-      <h2 class="section-title">🤔 什么是 ProxyIP ？</h2>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">📖 ProxyIP 概念</h3>
-      <p style="margin-bottom: 16px; line-height: 1.8; color: var(--text-secondary);">
-        在 Cloudflare Workers 环境中，ProxyIP 特指那些能够成功代理连接到 Cloudflare 服务的第三方 IP 地址。
-      </p>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">🔧 技术原理</h3>
-      <p style="margin-bottom: 16px; line-height: 1.8; color: var(--text-secondary);">
-        根据 Cloudflare Workers 的 <a href="https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/" target="_blank" style="color: var(--primary-color); text-decoration: none;">TCP Sockets 官方文档</a> 说明，存在以下技术限制：
-      </p>
-      
-      <div class="code-block" style="background: #fff3cd; color: #856404; border-left: 4px solid var(--warning-color);">
-        ⚠️ Outbound TCP sockets to <a href="https://www.cloudflare.com/ips/" target="_blank" >Cloudflare IP ranges ↗</a>  are temporarily blocked, but will be re-enabled shortly.
-      </div>
-      
-      <p style="margin: 16px 0; line-height: 1.8; color: var(--text-secondary);">
-        这意味着 Cloudflare Workers 无法直接连接到 Cloudflare 自有的 IP 地址段。为了解决这个限制，需要借助第三方云服务商的服务器作为"跳板"：
-      </p>
-      
-      <div style="background: var(--bg-secondary); padding: 20px; border-radius: var(--border-radius-sm); margin: 20px 0;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 16px;">
-          <div style="background: #e3f2fd; padding: 12px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
-            <div style="font-weight: 600; color: #1976d2;">Cloudflare Workers</div>
-            <div style="font-size: 0.9rem; color: var(--text-secondary);">发起请求</div>
-          </div>
-          <div style="color: var(--primary-color); font-size: 1.5rem;">→</div>
-          <div style="background: #f3e5f5; padding: 12px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
-            <div style="font-weight: 600; color: #7b1fa2;">ProxyIP 服务器</div>
-            <div style="font-size: 0.9rem; color: var(--text-secondary);">第三方代理</div>
-          </div>
-          <div style="color: var(--primary-color); font-size: 1.5rem;">→</div>
-          <div style="background: #e8f5e8; padding: 12px; border-radius: 8px; text-align: center; flex: 1; min-width: 120px;">
-            <div style="font-weight: 600; color: #388e3c;">Cloudflare 服务</div>
-            <div style="font-size: 0.9rem; color: var(--text-secondary);">目标服务</div>
-          </div>
-        </div>
-        <p style="text-align: center; color: var(--text-secondary); font-size: 0.95rem; margin: 0;">
-          通过第三方服务器反向代理 Cloudflare 的 443 端口，实现 Workers 对 Cloudflare 服务的访问
-        </p>
-      </div>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">🎯 实际应用场景</h3>
-      <div style="background: linear-gradient(135deg, #fff3cd, #ffeaa7); padding: 20px; border-radius: var(--border-radius-sm); border-left: 4px solid var(--warning-color); margin: 20px 0;">
-        <p style="margin-bottom: 16px; line-height: 1.8; color: #856404;">
-          <strong style="font-size: 1.1rem;">由于上述限制</strong>，<strong><a href="https://github.com/cmliu/edgetunnel" target="_blank" style="color: #d63384; text-decoration: none;">edgetunnel</a></strong>、<strong><a href="https://github.com/cmliu/epeius" target="_blank" style="color: #d63384; text-decoration: none;">epeius</a></strong> 等项目，在尝试访问使用 Cloudflare CDN 服务的网站时，会因为无法建立到 Cloudflare IP 段的连接而导致访问失败。
-        </p>
-        <p style="margin: 0; line-height: 1.8; color: #856404;">
-          <strong>解决方案：</strong>通过配置有效的 ProxyIP，这些项目可以绕过限制，成功访问托管在 Cloudflare 上的目标网站，确保服务的正常运行。
-        </p>
-      </div>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">✅ 有效 ProxyIP 特征</h3>
-      <div style="background: linear-gradient(135deg, #d4edda, #c3e6cb); padding: 20px; border-radius: var(--border-radius-sm); border-left: 4px solid var(--success-color);">
-        <ul style="margin: 0; color: #155724; line-height: 1.8; padding-left: 20px;">
-          <li><strong>网络连通性：</strong>能够成功建立到指定端口（通常为 443）的 TCP 连接</li>
-          <li><strong>代理功能：</strong>具备反向代理 Cloudflare IP 段的 HTTPS 服务能力</li>
-        </ul>
-      </div>
-      
-      <div style="background: var(--bg-tertiary); padding: 16px; border-radius: var(--border-radius-sm); margin-top: 20px; border-left: 4px solid var(--primary-color);">
-        <p style="margin: 0; color: var(--text-primary); font-weight: 500;">
-          💡 <strong>提示：</strong>本检测服务通过模拟真实的网络连接来验证 ProxyIP 的可用性，帮助您快速识别和筛选出稳定可靠的代理服务器。
-        </p>
-      </div>
-    </div>
-    
-    <div class="api-docs" style="margin-top: 50px;">
-      <h2 class="section-title">📚 API 文档</h2>
-      <p style="margin-bottom: 24px; color: var(--text-secondary); font-size: 1.1rem;">
-        提供简单易用的 RESTful API 接口，支持批量检测和域名解析
-      </p>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">📍 检查ProxyIP</h3>
-      <div class="code-block">
-        <strong style="color: #68d391;">GET</strong> /check?proxyip=<span class="highlight">YOUR_PROXY_IP</span>
-      </div>
-      
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">💡 使用示例</h3>
-      <div class="code-block">
-curl "https://${hostname}/check?proxyip=1.2.3.4:443"
-      </div>
+		<main class="site-main">
+			<section class="workspace-grid">
+				<div class="surface-card control-panel">
+					<div class="panel-header">
+						<div>
+							<p class="section-kicker">Workspace</p>
+							<h2 class="panel-title">开始检测</h2>
+							<p class="panel-copy">输入单个 IP、IPv6、域名或一整段列表。单条模式支持历史记录，批量模式适合直接粘贴多行目标。</p>
+						</div>
+						<div class="panel-badge">实时解析与验证</div>
+					</div>
 
-      <h3 style="color: var(--text-primary); margin: 24px 0 16px;">🔗 响应Json格式</h3>
-      <div class="code-block">
-{<br>
-&nbsp;&nbsp;"success": true|false, // 代理 IP 是否有效<br>
-&nbsp;&nbsp;"proxyIP": "1.2.3.4", // 如果有效,返回代理 IP,否则为 -1<br>
-&nbsp;&nbsp;"portRemote": 443, // 如果有效,返回端口,否则为 -1<br>
-&nbsp;&nbsp;"colo": "HKG", // 执行此次请求的Cloudflare机房<br>
-&nbsp;&nbsp;"responseTime": "166", // 如果有效,返回响应毫秒时间,否则为 -1<br>
-&nbsp;&nbsp;"message": "第1次验证有效ProxyIP", // 返回验证信息<br>
-&nbsp;&nbsp;"timestamp": "2025-06-03T17:27:52.946Z" // 检查时间<br>
-}<br>
-      </div>
-    </div>
-    
-    <div class="footer">
-      <p style="margin-top: 8px; opacity: 0.8;">© 2025 Check ProxyIP - 基于 Cloudflare Workers 构建的高性能 ProxyIP 验证服务 | 由 <strong>cmliu</strong> 开发</p>
-    </div>
-  </div>
+					<div class="input-zone">
+						<label class="field-label" for="inputList">ProxyIP / 域名目标</label>
+						<div class="input-wrapper" id="inputContainer">
+							<input class="input-control" type="text" id="inputList" placeholder="例如：ProxyIP.CMLiussss.net 或 8.223.63.150:443">
+							<button class="history-toggle" type="button" id="historyBtn" aria-label="查看历史记录">
+								<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+									<circle cx="12" cy="12" r="10"></circle>
+									<polyline points="12 6 12 12 16 14"></polyline>
+								</svg>
+							</button>
+							<div class="history-dropdown" id="historyDropdown"></div>
+						</div>
+						<p class="field-hint" id="fieldHint">单条模式支持历史快速回填，按 Enter 可以直接开始检测。</p>
+					</div>
 
-  <div id="toast" class="toast"></div>
+					<div class="control-row">
+						<div class="mode-card">
+							<div class="mode-copy">
+								<strong>批量检测</strong>
+								<div class="mode-state" id="modeLabel">Single / 单目标</div>
+							</div>
+							<label class="switch">
+								<input type="checkbox" id="batchMode">
+								<span class="slider"></span>
+							</label>
+						</div>
 
-  <script>
-    // 全局变量
-    let isChecking = false;
-    const ipCheckResults = new Map(); // 缓存IP检查结果
-    let pageLoadTimestamp; // 页面加载时的时间戳
-    
-    // 计算时间戳的函数
-    function calculateTimestamp() {
-      const currentDate = new Date();
-      return Math.ceil(currentDate.getTime() / (1000 * 60 * 13)); // 每13分钟一个时间戳
-    }
-    
-    // 添加前端的代理IP格式验证函数
-    function isValidProxyIPFormat(input) {
-      // 检查是否为域名格式
-      const domainRegex = /^[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?(\\.[a-zA-Z0-9]([a-zA-Z0-9\\-]{0,61}[a-zA-Z0-9])?)*$/;
-      // 检查是否为IP格式
-      const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-      const ipv6Regex = /^\\[?([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}\\]?$/;
+						<button class="primary-btn" id="checkBtn" type="button">
+							<span>开始检测</span>
+							<small>Resolve + Check</small>
+						</button>
+					</div>
 
-      // 允许带端口的格式
-      const withPortRegex = /^.+:\\d+$/;
-      const tpPortRegex = /^.+\\.tp\\d+\\./;
+				</div>
 
-      return domainRegex.test(input) ||
-        ipv4Regex.test(input) ||
-        ipv6Regex.test(input) ||
-        withPortRegex.test(input) ||
-        tpPortRegex.test(input);
-    }
-    
-    // 初始化
-    document.addEventListener('DOMContentLoaded', function() {
-      // 记录页面加载时的时间戳
-      pageLoadTimestamp = calculateTimestamp();
-      console.log('页面加载完成，时间戳:', pageLoadTimestamp);
-      
-      const input = document.getElementById('proxyip');
-      input.focus();
-      
-      // 直接解析当前URL路径
-      const currentPath = window.location.pathname;
-      let autoCheckValue = null;
-      
-      // 检查URL参数中的autocheck（保持兼容性）
-      const urlParams = new URLSearchParams(window.location.search);
-      autoCheckValue = urlParams.get('autocheck');
-      
-      // 如果没有autocheck参数，检查路径
-      if (!autoCheckValue && currentPath.length > 1) {
-        const pathContent = currentPath.substring(1); // 移除开头的 '/'
-        
-        // 检查路径是否为有效的代理IP格式
-        if (isValidProxyIPFormat(pathContent)) {
-          autoCheckValue = pathContent;
-          // 清理URL，移除路径部分
-          const newUrl = new URL(window.location);
-          newUrl.pathname = '/';
-          window.history.replaceState({}, '', newUrl);
-        }
-      }
-      
-      // 如果没有从URL获取到值，尝试从localStorage获取上次搜索的地址
-      if (!autoCheckValue) {
-        try {
-          const lastSearch = localStorage.getItem('lastProxyIP');
-          if (lastSearch && isValidProxyIPFormat(lastSearch)) {
-            input.value = lastSearch;
-            // 不自动执行检测，只是填充输入框
-          }
-        } catch (error) {
-          console.log('读取历史记录失败:', error);
-        }
-      }
-      
-      if (autoCheckValue) {
-        input.value = autoCheckValue;
-        // 如果来自URL参数，清除参数
-        if (urlParams.has('autocheck')) {
-          const newUrl = new URL(window.location);
-          newUrl.searchParams.delete('autocheck');
-          window.history.replaceState({}, '', newUrl);
-        }
-        
-        // 延迟执行搜索，确保页面完全加载
-        setTimeout(() => {
-          if (!isChecking) {
-            checkProxyIP();
-          }
-        }, 500);
-      }
-      
-      // 输入框回车事件
-      input.addEventListener('keypress', function(event) {
-        if (event.key === 'Enter' && !isChecking) {
-          checkProxyIP();
-        }
-      });
-      
-      // 添加事件委托处理复制按钮点击
-      document.addEventListener('click', function(event) {
-        if (event.target.classList.contains('copy-btn')) {
-          const text = event.target.getAttribute('data-copy');
-          if (text) {
-            copyToClipboard(text, event.target);
-          }
-        }
-      });
-    });
-    
-    // 显示toast消息
-    function showToast(message, duration = 3000) {
-      const toast = document.getElementById('toast');
-      toast.textContent = message;
-      toast.classList.add('show');
-      
-      setTimeout(() => {
-        toast.classList.remove('show');
-      }, duration);
-    }
-    
-    // 复制到剪贴板
-    function copyToClipboard(text, element) {
-      navigator.clipboard.writeText(text).then(() => {
-        const originalText = element.textContent;
-        element.classList.add('copied');
-        element.textContent = '已复制 ✓';
-        showToast('复制成功！');
-        
-        setTimeout(() => {
-          element.classList.remove('copied');
-          element.textContent = originalText;
-        }, 2000);
-      }).catch(err => {
-        console.error('复制失败:', err);
-        showToast('复制失败，请手动复制');
-      });
-    }
-    
-    // 创建复制按钮
-    function createCopyButton(text) {
-      return \`<span class="copy-btn" data-copy="\${text}">\${text}</span>\`;
-    }
-    
-    // 检查是否为IP地址
-    function isIPAddress(input) {
-      const ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$/;
-      const ipv6Regex = /^\\[?([0-9a-fA-F]{0,4}:){1,7}[0-9a-fA-F]{0,4}\\]?$/;
-      const ipv6WithPortRegex = /^\\[[0-9a-fA-F:]+\\]:\\d+$/;
-      const ipv4WithPortRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?):\\d+$/;
-      
-      return ipv4Regex.test(input) || ipv6Regex.test(input) || ipv6WithPortRegex.test(input) || ipv4WithPortRegex.test(input);
-    }
-    
-    // 添加输入预处理函数
-    function preprocessInput(input) {
-      if (!input) return input;
-      
-      // 去除首尾空格
-      let processed = input.trim();
-      
-      // 检查是否还有空格
-      if (processed.includes(' ')) {
-        // 只保留第一个空格前的内容
-        processed = processed.split(' ')[0];
-      }
-      
-      return processed;
-    }
-    
-    // 主检测函数
-    async function checkProxyIP() {
-      if (isChecking) return;
-      
-      const proxyipInput = document.getElementById('proxyip');
-      const resultDiv = document.getElementById('result');
-      const checkBtn = document.getElementById('checkBtn');
-      const btnText = checkBtn.querySelector('.btn-text');
-      const spinner = checkBtn.querySelector('.loading-spinner');
-      
-      const rawInput = proxyipInput.value;
-      const proxyip = preprocessInput(rawInput);
-      
-      // 如果预处理后的值与原值不同，更新输入框
-      if (proxyip !== rawInput) {
-        proxyipInput.value = proxyip;
-        showToast('已自动清理输入内容');
-      }
-      
-      if (!proxyip) {
-        showToast('请输入代理IP地址');
-        proxyipInput.focus();
-        return;
-      }
-      
-      // 检查时间戳是否过期
-      const currentTimestamp = calculateTimestamp();
-      console.log('点击检测时的时间戳:', currentTimestamp);
-      console.log('页面加载时的时间戳:', pageLoadTimestamp);
-      console.log('时间戳是否一致:', currentTimestamp === pageLoadTimestamp);
-      
-      if (currentTimestamp !== pageLoadTimestamp) {
-        // 时间戳已过期，需要重新加载页面获取最新TOKEN
-        const currentHost = window.location.host;
-        const currentProtocol = window.location.protocol;
-        const redirectUrl = \`\${currentProtocol}//\${currentHost}/\${encodeURIComponent(proxyip)}\`;
-        
-        console.log('时间戳过期，即将跳转到:', redirectUrl);
-        showToast('TOKEN已过期，正在刷新页面...');
-        
-        // 延迟跳转，让用户看到提示
-        setTimeout(() => {
-          window.location.href = redirectUrl;
-        }, 1000);
-        
-        return;
-      }
-      
-      console.log('时间戳验证通过，继续执行检测逻辑');
-      
-      // 保存到localStorage
-      try {
-        localStorage.setItem('lastProxyIP', proxyip);
-      } catch (error) {
-        console.log('保存历史记录失败:', error);
-      }
-      
-      // 设置加载状态
-      isChecking = true;
-      checkBtn.classList.add('btn-loading');
-      checkBtn.disabled = true;
-      btnText.style.display = 'none';
-      spinner.style.display = 'block';
-      resultDiv.classList.remove('show');
-      
-      try {
-        if (isIPAddress(proxyip)) {
-          await checkSingleIP(proxyip, resultDiv);
-        } else {
-          await checkDomain(proxyip, resultDiv);
-        }
-      } catch (err) {
-        resultDiv.innerHTML = \`
-          <div class="result-card result-error">
-            <h3>❌ 检测失败</h3>
-            <p><strong>错误信息:</strong> \${err.message}</p>
-            <p><strong>检测时间:</strong> \${new Date().toLocaleString()}</p>
-          </div>
-        \`;
-        resultDiv.classList.add('show');
-      } finally {
-        isChecking = false;
-        checkBtn.classList.remove('btn-loading');
-        checkBtn.disabled = false;
-        btnText.style.display = 'block';
-        spinner.style.display = 'none';
-      }
-    }
-    
-    // 检查单个IP
-    async function checkSingleIP(proxyip, resultDiv) {
-      const response = await fetch(\`./check?proxyip=\${encodeURIComponent(proxyip)}\`);
-      const data = await response.json();
-      
-      if (data.success) {
-        const ipInfo = await getIPInfo(data.proxyIP);
-        const ipInfoHTML = formatIPInfo(ipInfo);
-        const responseTimeHTML = data.responseTime && data.responseTime > 0 ? 
-          \`<div class="tooltip">
-            <span style="background: var(--success-color); color: white; padding: 4px 8px; border-radius: 6px; font-weight: 600; font-size: 14px;">\${data.responseTime}ms</span>
-            <span class="tooltiptext">该延迟并非 <strong>您当前网络</strong> 到 ProxyIP 的实际延迟，<br>而是 <strong>Cloudflare.\${data.colo || 'CF'} 机房</strong> 到 ProxyIP 的响应时间。</span>
-          </div>\` : 
-          '<span style="color: var(--text-light);">延迟未知</span>';
-        
-        resultDiv.innerHTML = \`
-          <div class="result-card result-success">
-            <h3>✅ ProxyIP 有效</h3>
-            <div style="margin-top: 20px;">
-              <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
-                <strong>🌐 ProxyIP 地址:</strong>
-                \${createCopyButton(data.proxyIP)}
-                \${ipInfoHTML}
-                \${responseTimeHTML}
-              </div>
-              <p><strong>🔌 端口:</strong> \${createCopyButton(data.portRemote.toString())}</p>
-              <p><strong>🏢 机房信息:</strong> \${data.colo || 'CF'}</p>
-              <p><strong>🕒 检测时间:</strong> \${new Date(data.timestamp).toLocaleString()}</p>
-            </div>
-          </div>
-        \`;
-      } else {
-        resultDiv.innerHTML = \`
-          <div class="result-card result-error">
-            <h3>❌ ProxyIP 失效</h3>
-            <div style="margin-top: 20px;">
-              <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;">
-                <strong>🌐 IP地址:</strong>
-                \${createCopyButton(proxyip)}
-                <span style="color: var(--error-color); font-weight: 600; font-size: 18px;">❌</span>
-              </div>
-              <p><strong>🔌 端口:</strong> \${data.portRemote && data.portRemote !== -1 ? createCopyButton(data.portRemote.toString()) : '未知'}</p>
-              <p><strong>🏢 机房信息:</strong> \${data.colo || 'CF'}</p>
-              \${data.message ? \`<p><strong>错误信息:</strong> \${data.message}</p>\` : ''}
-              <p><strong>🕒 检测时间:</strong> \${new Date(data.timestamp).toLocaleString()}</p>
-            </div>
-          </div>
-        \`;
-      }
-      resultDiv.classList.add('show');
-    }
-    
-    // 检查域名
-    async function checkDomain(domain, resultDiv) {
-      let portRemote = 443;
-      let cleanDomain = domain;
-      
-      // 解析端口
-      if (domain.includes('.tp')) {
-        portRemote = domain.split('.tp')[1].split('.')[0] || 443;
-      } else if (domain.includes('[') && domain.includes(']:')) {
-        portRemote = parseInt(domain.split(']:')[1]) || 443;
-        cleanDomain = domain.split(']:')[0] + ']';
-      } else if (domain.includes(':')) {
-        portRemote = parseInt(domain.split(':')[1]) || 443;
-        cleanDomain = domain.split(':')[0];
-      }
-      
-      // 解析域名
-      const resolveResponse = await fetch(\`./resolve?domain=\${encodeURIComponent(cleanDomain)}&token=${临时TOKEN}\`);
-      const resolveData = await resolveResponse.json();
-      
-      if (!resolveData.success) {
-        throw new Error(resolveData.error || '域名解析失败');
-      }
-      
-      const ips = resolveData.ips;
-      if (!ips || ips.length === 0) {
-        throw new Error('未找到域名对应的IP地址');
-      }
-      
-      // 清空缓存
-      ipCheckResults.clear();
-      
-      // 显示初始结果
-      resultDiv.innerHTML = \`
-        <div class="result-card result-warning">
-          <h3>🔍 域名解析结果</h3>
-          <div style="margin-top: 20px;">
-            <p><strong>🌐 ProxyIP 域名:</strong> \${createCopyButton(cleanDomain)}</p>
-            <p><strong>🔌 端口:</strong> \${createCopyButton(portRemote.toString())}</p>
-            <p><strong>🏢 机房信息:</strong> <span id="domain-colo">检测中...</span></p>
-            <p><strong>📋 发现IP:</strong> \${ips.length} 个</p>
-            <p><strong>🕒 解析时间:</strong> \${new Date().toLocaleString()}</p>
-          </div>
-          <div class="ip-grid" id="ip-grid">
-            \${ips.map((ip, index) => \`
-              <div class="ip-item" id="ip-item-\${index}">
-                <div class="ip-status-line" id="ip-status-line-\${index}">
-                  <strong>IP:</strong>
-                  \${createCopyButton(ip)}
-                  <span id="ip-info-\${index}" style="color: var(--text-secondary);">获取信息中...</span>
-                  <span class="status-icon" id="status-icon-\${index}">🔄</span>
-                </div>
-              </div>
-            \`).join('')}
-          </div>
-        </div>
-      \`;
-      resultDiv.classList.add('show');
-      
-      // 并发检查所有IP和获取IP信息
-      const checkPromises = ips.map((ip, index) => checkIPWithIndex(ip, portRemote, index));
-      const ipInfoPromises = ips.map((ip, index) => getIPInfoWithIndex(ip, index));
-      
-      await Promise.all([...checkPromises, ...ipInfoPromises]);
-      
-      // 使用缓存的结果更新整体状态和机房信息
-      const validCount = Array.from(ipCheckResults.values()).filter(r => r.success).length;
-      const totalCount = ips.length;
-      const resultCard = resultDiv.querySelector('.result-card');
-      
-      // 获取第一个有效结果的colo信息
-      const firstValidResult = Array.from(ipCheckResults.values()).find(r => r.success && r.colo);
-      const coloInfo = firstValidResult?.colo || 'CF';
-      
-      // 更新机房信息
-      const coloElement = document.getElementById('domain-colo');
-      if (coloElement) {
-        coloElement.textContent = coloInfo;
-      }
-      
-      if (validCount === totalCount) {
-        resultCard.className = 'result-card result-success';
-        resultCard.querySelector('h3').innerHTML = '✅ 所有IP均有效';
-      } else if (validCount === 0) {
-        resultCard.className = 'result-card result-error';
-        resultCard.querySelector('h3').innerHTML = '❌ 所有IP均失效';
-      } else {
-        resultCard.className = 'result-card result-warning';
-        resultCard.querySelector('h3').innerHTML = \`⚠️ 部分IP有效 (\${validCount}/\${totalCount})\`;
-      }
-    }
-    
-    // 检查单个IP（带索引）
-    async function checkIPWithIndex(ip, port, index) {
-      try {
-        const cacheKey = \`\${ip}:\${port}\`;
-        let result;
-        
-        // 检查是否已有缓存结果
-        if (ipCheckResults.has(cacheKey)) {
-          result = ipCheckResults.get(cacheKey);
-        } else {
-          // 调用API检查IP状态
-          result = await checkIPStatus(cacheKey);
-          // 缓存结果
-          ipCheckResults.set(cacheKey, result);
-        }
-        
-        const itemElement = document.getElementById(\`ip-item-\${index}\`);
-        const statusIcon = document.getElementById(\`status-icon-\${index}\`);
-        
-        if (result.success) {
-          itemElement.style.background = 'linear-gradient(135deg, #d4edda, #c3e6cb)';
-          itemElement.style.borderColor = 'var(--success-color)';
-          
-          const responseTimeHTML = result.responseTime && result.responseTime > 0 ? 
-            \`<div class="tooltip">
-              <span style="background: var(--success-color); color: white; padding: 2px 6px; border-radius: 4px; font-size: 12px; font-weight: 600;">\${result.responseTime}ms</span>
-              <span class="tooltiptext">该延迟并非 <strong>您当前网络</strong> 到 ProxyIP 的实际延迟，<br>而是 <strong>Cloudflare.\${result.colo || 'CF'} 机房</strong> 到 ProxyIP 的响应时间。</span>
-            </div>\` : 
-            '<span style="color: var(--text-light); font-size: 12px;">延迟未知</span>';
-            
-          statusIcon.innerHTML = responseTimeHTML;
-          statusIcon.className = 'status-icon status-success';
-        } else {
-          itemElement.style.background = 'linear-gradient(135deg, #f8d7da, #f5c6cb)';
-          itemElement.style.borderColor = 'var(--error-color)';
-          statusIcon.textContent = '❌';
-          statusIcon.className = 'status-icon status-error';
-          statusIcon.style.color = 'var(--error-color)';
-          statusIcon.style.fontSize = '18px';
-        }
-      } catch (error) {
-        console.error('检查IP失败:', error);
-        const statusIcon = document.getElementById(\`status-icon-\${index}\`);
-        if (statusIcon) {
-          statusIcon.textContent = '❌';
-          statusIcon.className = 'status-icon status-error';
-          statusIcon.style.color = 'var(--error-color)';
-          statusIcon.style.fontSize = '18px';
-        }
-        // 将失败结果也缓存起来
-        const cacheKey = \`\${ip}:\${port}\`;
-        ipCheckResults.set(cacheKey, { success: false, error: error.message, colo: 'CF' });
-      }
-    }
-    
-    // 获取IP信息（带索引）
-    async function getIPInfoWithIndex(ip, index) {
-      try {
-        const ipInfo = await getIPInfo(ip);
-        const infoElement = document.getElementById(\`ip-info-\${index}\`);
-        if (infoElement) {
-          infoElement.innerHTML = formatIPInfo(ipInfo);
-        }
-      } catch (error) {
-        console.error('获取IP信息失败:', error);
-        const infoElement = document.getElementById(\`ip-info-\${index}\`);
-        if (infoElement) {
-          infoElement.innerHTML = '<span style="color: var(--text-light);">信息获取失败</span>';
-        }
-      }
-    }
-    
-    // 获取IP信息
-    async function getIPInfo(ip) {
-      try {
-        const cleanIP = ip.replace(/[\\[\\]]/g, '');
-        const response = await fetch(\`./ip-info?ip=\${encodeURIComponent(cleanIP)}&token=${临时TOKEN}\`);
-        const data = await response.json();
-        return data;
-      } catch (error) {
-        return null;
-      }
-    }
-    
-    // 格式化IP信息
-    function formatIPInfo(ipInfo) {
-      if (!ipInfo || ipInfo.status !== 'success') {
-        return '<span style="color: var(--text-light);">信息获取失败</span>';
-      }
-      
-      const country = ipInfo.country || '未知';
-      const as = ipInfo.as || '未知';
-      
-      return \`
-        <span class="tag tag-country">\${country}</span>
-        <span class="tag tag-as">\${as}</span>
-      \`;
-    }
-    
-    // 检查IP状态
-    async function checkIPStatus(ip) {
-      try {
-        const response = await fetch(\`./check?proxyip=\${encodeURIComponent(ip)}\`);
-        const data = await response.json();
-        return data;
-      } catch (error) {
-        return { success: false, error: error.message };
-      }
-    }
-  </script>
+				<aside class="side-column">
+					<div class="surface-card side-card">
+						<p class="section-kicker">Summary</p>
+						<h3 class="summary-title" id="summaryHeadline">等待输入</h3>
+						<p class="summary-description" id="summaryDescription">实时统计和检测概览。</p>
+						<div id="progressContainer" class="progress-container">
+							<div class="progress-head">
+								<span>检测进度</span>
+								<span id="progressText">尚未开始</span>
+							</div>
+							<div class="progress-track">
+								<div id="progressBar" class="progress-bar"></div>
+							</div>
+						</div>
+						<div class="summary-grid">
+							<div class="metric-card">
+								<span>目标数</span>
+								<strong id="statTotal">0</strong>
+							</div>
+							<div class="metric-card">
+								<span>有效</span>
+								<strong id="statSuccess">0</strong>
+							</div>
+							<div class="metric-card">
+								<span>待完成</span>
+								<strong id="statPending">0</strong>
+							</div>
+							<div class="metric-card">
+								<span>失败</span>
+								<strong id="statFailed">0</strong>
+							</div>
+						</div>
+					</div>
+				</aside>
+			</section>
+
+			<section class="surface-card results-shell">
+				<div class="results-header">
+					<div>
+						<p class="section-kicker">Results</p>
+						<h2 class="results-title">检测结果</h2>
+						<p class="results-subtitle" id="resultMeta">结果、落地 IP 和地图会在这里按检测进度逐步展开。</p>
+					</div>
+					<div class="results-pill state-idle" id="resultPill">Idle</div>
+				</div>
+
+				<div class="results-empty" id="resultsEmpty">
+					<div class="empty-visual" aria-hidden="true">
+						<span></span>
+						<span></span>
+						<span></span>
+					</div>
+					<div class="empty-copy">
+						<h3 id="emptyStateTitle">等待开始检测</h3>
+						<p id="emptyStateDescription">输入目标后，检测结果、出口信息和地图会在这里展示。</p>
+					</div>
+				</div>
+
+				<div id="results" class="results-list"></div>
+			</section>
+
+			<section class="surface-card guide-shell">
+				<div class="guide-header">
+					<div>
+						<p class="section-kicker">Guide</p>
+						<h2 class="results-title">什么是 ProxyIP</h2>
+						<p class="results-subtitle">用一段更接近实际部署场景的说明，快速理解 ProxyIP 的定义、作用和筛选标准。</p>
+					</div>
+					<div class="guide-badge">Cloudflare Workers / TCP</div>
+				</div>
+
+				<div class="guide-grid">
+					<article class="guide-card guide-card-accent">
+						<div class="guide-card-label">概念</div>
+						<h3>ProxyIP 是一个可被验证的中转入口</h3>
+						<p>在 Cloudflare Workers 的使用语境里，ProxyIP 通常指那些能够成功代理到 Cloudflare 服务的第三方 IP。它不是 Cloudflare 官方分配给你的接入地址，而是一个可以替你完成转发的外部节点。</p>
+					</article>
+
+					<article class="guide-card guide-card-warm">
+						<div class="guide-card-label">限制来源</div>
+						<h3>为什么很多场景会专门去找 ProxyIP</h3>
+						<p>Cloudflare Workers 的 <a href="https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/" target="_blank" rel="noreferrer">TCP sockets 文档</a> 明确提到，指向 <a href="https://developers.cloudflare.com/fundamentals/concepts/cloudflare-ip-addresses/" target="_blank" rel="noreferrer">Cloudflare IP ranges</a> 的出站 TCP 连接会被阻止。也就是说，某些依赖直连 Cloudflare IP 的链路，不能在 Workers 里直接打通。</p>
+						<div class="guide-quote">Outbound TCP sockets to Cloudflare IP ranges are blocked.</div>
+					</article>
+				</div>
+
+				<div class="guide-flow">
+					<div class="guide-step is-source">
+						<strong>Cloudflare Workers</strong>
+						<span>发起请求，尝试访问目标服务</span>
+					</div>
+					<div class="guide-arrow" aria-hidden="true">→</div>
+					<div class="guide-step is-proxy">
+						<strong>ProxyIP 节点</strong>
+						<span>位于第三方网络，负责中转和反向代理</span>
+					</div>
+					<div class="guide-arrow" aria-hidden="true">→</div>
+					<div class="guide-step is-target">
+						<strong>Cloudflare 服务</strong>
+						<span>最终被访问的站点、边缘服务或 CDN 目标</span>
+					</div>
+					<p class="guide-flow-caption">实际作用可以理解为：让 Workers 先连到第三方节点，再由该节点替你把流量送到 Cloudflare 侧，绕开直连 Cloudflare IP 的限制。</p>
+				</div>
+
+				<div class="guide-grid guide-grid-secondary">
+					<article class="guide-card">
+						<div class="guide-card-label">应用场景</div>
+						<h3>为什么像 edgetunnel、epeius 这类项目会用到它</h3>
+						<p>当目标网站本身走的是 Cloudflare CDN 或 Cloudflare 边缘网络时，项目如果需要直接建立到目标地址的 TCP 连接，就可能因为上述限制而失败。配置可用的 ProxyIP 后，这类项目就能借助中转节点继续完成访问。</p>
+					</article>
+
+					<article class="guide-card">
+						<div class="guide-card-label">有效特征</div>
+						<h3>有效的 ProxyIP，通常至少满足这些条件</h3>
+						<ul class="guide-list">
+							<li>能够成功建立代理到指定端口（通常为 443）的 TCP 连接</li>
+							<li>具备反向代理 Cloudflare IP 段的 HTTPS 服务能力</li>
+						</ul>
+					</article>
+				</div>
+
+				<div class="guide-tip">
+					<strong>这页检测的意义：</strong>本工具不是只做静态解析，而是尽量模拟真实链路去验证目标是否真的可用，帮助你更快筛掉“看起来在线、实际不可做代理”的候选 IP。
+				</div>
+			</section>
+		</main>
+
+		<footer class="site-footer">
+			<div>© 2026 Check ProxyIP · 基于 Cloudflare Workers 构建，用于高效筛选可访问 Cloudflare 的代理目标。该服务由 <a href="https://github.com/cmliu/CF-Workers-CheckProxyIP" target="_blank" rel="noreferrer">cmliu</a> 维护 · <a href="https://t.me/CMLiussss" target="_blank" rel="noreferrer">CMLiussss 技术交流群</a></div>
+		</footer>
+	</div>
+
+	<div id="map-template">
+		<div id="global-map"></div>
+	</div>
+
+	<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+	<script>
+		const checkBtn = document.getElementById('checkBtn');
+		let inputList = document.getElementById('inputList');
+		const inputContainer = document.getElementById('inputContainer');
+		const batchMode = document.getElementById('batchMode');
+		const resultsDiv = document.getElementById('results');
+		const progressBar = document.getElementById('progressBar');
+		const progressText = document.getElementById('progressText');
+		const globalMap = document.getElementById('global-map');
+		const historyBtn = document.getElementById('historyBtn');
+		const historyDropdown = document.getElementById('historyDropdown');
+		const fieldHint = document.getElementById('fieldHint');
+		const modeLabel = document.getElementById('modeLabel');
+		const summaryHeadline = document.getElementById('summaryHeadline');
+		const summaryDescription = document.getElementById('summaryDescription');
+		const statTotal = document.getElementById('statTotal');
+		const statSuccess = document.getElementById('statSuccess');
+		const statPending = document.getElementById('statPending');
+		const statFailed = document.getElementById('statFailed');
+		const resultMeta = document.getElementById('resultMeta');
+		const resultPill = document.getElementById('resultPill');
+		const resultsEmpty = document.getElementById('resultsEmpty');
+		const emptyStateTitle = document.getElementById('emptyStateTitle');
+		const emptyStateDescription = document.getElementById('emptyStateDescription');
+		const themeToggle = document.getElementById('themeToggle');
+		const THEME_STORAGE_KEY = 'cf_proxy_theme';
+		const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+		let map = null;
+		let mapLayers = [];
+		let mapSvgRenderer = null;
+		let cfLocationIndex = new Map();
+		let cfLocationsPromise = null;
+		let mapRenderToken = 0;
+		let totalTargets = 0;
+		let completedCount = 0;
+		let successCount = 0;
+		let inputCount = 0;
+		let appState = 'idle';
+
+		function getStoredTheme() {
+			try {
+				const storedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+				return storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : '';
+			} catch {
+				return '';
+			}
+		}
+
+		function getSystemTheme() {
+			return systemThemeQuery.matches ? 'dark' : 'light';
+		}
+
+		function applyTheme(theme, source) {
+			const nextTheme = theme === 'light' ? 'light' : 'dark';
+			const isDark = nextTheme === 'dark';
+
+			document.documentElement.dataset.theme = nextTheme;
+			document.documentElement.style.colorScheme = nextTheme;
+
+			if (!themeToggle) return;
+
+			themeToggle.setAttribute('aria-pressed', String(isDark));
+			themeToggle.setAttribute(
+				'aria-label',
+				isDark
+					? '当前为夜间模式，点击切换到日间模式。'
+					: '当前为日间模式，点击切换到夜间模式。'
+			);
+			themeToggle.title = source === 'stored'
+				? (isDark ? '夜间模式，已保存到本地' : '日间模式，已保存到本地')
+				: (isDark ? '夜间模式，当前跟随系统' : '日间模式，当前跟随系统');
+		}
+
+		function initializeTheme() {
+			const storedTheme = getStoredTheme();
+			applyTheme(storedTheme || getSystemTheme(), storedTheme ? 'stored' : 'system');
+		}
+
+		initializeTheme();
+
+		function initMap() {
+			if (map) return;
+			map = L.map('global-map', {
+				zoomControl: false,
+				attributionControl: false
+			}).setView([20, 0], 2);
+			L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', {
+				subdomains: ['1', '2', '3', '4'],
+				maxZoom: 18
+			}).addTo(map);
+			mapSvgRenderer = L.svg();
+			mapSvgRenderer.addTo(map);
+		}
+
+		function normalizeColoCode(value) {
+			const code = String(value || '').trim().toUpperCase();
+			return /^[A-Z0-9]{3,4}$/.test(code) ? code : '';
+		}
+
+		function isValidCoordinatePair(value) {
+			return Array.isArray(value)
+				&& value.length === 2
+				&& value.every(function (entry) { return Number.isFinite(entry); })
+				&& Math.abs(value[0]) <= 90
+				&& Math.abs(value[1]) <= 180;
+		}
+
+		function parseCoordinatePair(value) {
+			if (typeof value === 'string') {
+				const parts = value.split(',').map(function (entry) {
+					return Number(entry.trim());
+				});
+				return isValidCoordinatePair(parts) ? parts : null;
+			}
+
+			if (Array.isArray(value)) {
+				const parts = value.map(function (entry) {
+					return Number(entry);
+				});
+				return isValidCoordinatePair(parts) ? parts : null;
+			}
+
+			return null;
+		}
+
+		async function loadCfLocations() {
+			if (cfLocationsPromise) {
+				return cfLocationsPromise;
+			}
+
+			cfLocationsPromise = fetch('/locations')
+				.then(function (response) {
+					if (!response.ok) {
+						throw new Error('Failed to load /locations: ' + response.status);
+					}
+					return response.json();
+				})
+				.then(function (payload) {
+					const nextIndex = new Map();
+					if (Array.isArray(payload)) {
+						payload.forEach(function (entry) {
+							const code = normalizeColoCode(entry?.iata);
+							const lat = Number(entry?.lat);
+							const lon = Number(entry?.lon);
+							if (!code || !Number.isFinite(lat) || !Number.isFinite(lon)) {
+								return;
+							}
+							nextIndex.set(code, {
+								code: code,
+								lat: lat,
+								lon: lon,
+								city: String(entry?.city || '').trim(),
+								region: String(entry?.region || '').trim(),
+								country: String(entry?.cca2 || '').trim()
+							});
+						});
+					}
+					cfLocationIndex = nextIndex;
+					return nextIndex;
+				})
+				.catch(function (error) {
+					console.error('Failed to preload Cloudflare locations', error);
+					return cfLocationIndex;
+				});
+
+			return cfLocationsPromise;
+		}
+
+		function getCfLocation(coloCode) {
+			const normalizedCode = normalizeColoCode(coloCode);
+			if (!normalizedCode) {
+				return null;
+			}
+
+			const location = cfLocationIndex.get(normalizedCode);
+			return location ? {
+				code: location.code,
+				lat: location.lat,
+				lon: location.lon,
+				city: location.city,
+				region: location.region,
+				country: location.country
+			} : null;
+		}
+
+		function clearMapLayers() {
+			mapLayers.forEach(function (layer) {
+				map.removeLayer(layer);
+			});
+			mapLayers = [];
+		}
+
+		function buildCfLocationLabel(cfLocation) {
+			return [cfLocation?.city, cfLocation?.region, cfLocation?.country].filter(Boolean).join(', ');
+		}
+
+		function ensureRouteArrowMarkerDef() {
+			const overlaySvg = map?.getPanes?.().overlayPane?.querySelector('svg');
+			if (!overlaySvg) {
+				return '';
+			}
+
+			const svgNamespace = 'http://www.w3.org/2000/svg';
+			let defs = overlaySvg.querySelector('defs');
+			if (!defs) {
+				defs = document.createElementNS(svgNamespace, 'defs');
+				overlaySvg.insertBefore(defs, overlaySvg.firstChild);
+			}
+
+			const markerId = 'route-flow-arrowhead';
+			if (!overlaySvg.querySelector('#' + markerId)) {
+				const marker = document.createElementNS(svgNamespace, 'marker');
+				marker.setAttribute('id', markerId);
+				marker.setAttribute('viewBox', '0 0 10 10');
+				marker.setAttribute('refX', '8');
+				marker.setAttribute('refY', '5');
+				marker.setAttribute('markerWidth', '7');
+				marker.setAttribute('markerHeight', '7');
+				marker.setAttribute('orient', 'auto');
+				marker.setAttribute('markerUnits', 'strokeWidth');
+
+				const arrowPath = document.createElementNS(svgNamespace, 'path');
+				arrowPath.setAttribute('d', 'M 0 0 L 10 5 L 0 10 z');
+				arrowPath.setAttribute('fill', '#8be9ff');
+				arrowPath.setAttribute('fill-opacity', '0.95');
+
+				marker.appendChild(arrowPath);
+				defs.appendChild(marker);
+			}
+
+			return markerId;
+		}
+
+		function applyArrowStyleToPolyline(polyline) {
+			const markerId = ensureRouteArrowMarkerDef();
+			const pathElement = polyline?.getElement?.();
+			if (!markerId || !pathElement) {
+				return;
+			}
+
+			pathElement.setAttribute('marker-end', 'url(#' + markerId + ')');
+			pathElement.setAttribute('stroke-linecap', 'round');
+		}
+
+		function createExitPopup(exitData) {
+			const locationText = formatExitLocation(exitData) || 'Location unknown';
+			const networkText = formatExitNetwork(exitData) || 'Network unknown';
+			const coloCode = normalizeColoCode(exitData?.colo);
+			const coloText = coloCode ? '<br>CF Colo: ' + escapeHtml(coloCode) : '';
+			return '<div class="map-popup"><b>Exit IP</b><br>'
+				+ escapeHtml(exitData?.ip || 'Unknown')
+				+ '<br>' + escapeHtml(locationText)
+				+ '<br>' + escapeHtml(networkText)
+				+ coloText
+				+ '</div>';
+		}
+
+		function createCfPopup(cfLocation) {
+			const locationText = buildCfLocationLabel(cfLocation) || 'Location unknown';
+			return '<div class="map-popup"><b>Cloudflare Colo</b><br>'
+				+ escapeHtml(cfLocation?.code || 'Unknown')
+				+ '<br>' + escapeHtml(locationText)
+				+ '</div>';
+		}
+
+		function escapeHtml(value) {
+			return String(value ?? '').replace(/[&<>"']/g, function (char) {
+				return {
+					'&': '&amp;',
+					'<': '&lt;',
+					'>': '&gt;',
+					'"': '&quot;',
+					"'": '&#39;'
+				}[char];
+			});
+		}
+
+		function normalizeBatchInputValue(value) {
+			return String(value ?? '')
+				.replace(/\\r\\n?/g, '\\n')
+				.replace(/[,\uFF0C]/g, '\\n');
+		}
+
+		function normalizeBatchInputControl(control) {
+			if (!control || control.tagName !== 'TEXTAREA') return;
+
+			const rawValue = control.value;
+			const nextValue = normalizeBatchInputValue(rawValue);
+
+			if (nextValue === rawValue) return;
+
+			const selectionStart = control.selectionStart ?? rawValue.length;
+			const selectionEnd = control.selectionEnd ?? rawValue.length;
+			const nextSelectionStart = normalizeBatchInputValue(rawValue.slice(0, selectionStart)).length;
+			const nextSelectionEnd = normalizeBatchInputValue(rawValue.slice(0, selectionEnd)).length;
+
+			control.value = nextValue;
+			control.setSelectionRange(nextSelectionStart, nextSelectionEnd);
+		}
+
+		function bindInputShortcut() {
+			inputList.addEventListener('input', function () {
+				if (!batchMode.checked) return;
+				normalizeBatchInputControl(inputList);
+			});
+
+			inputList.addEventListener('keydown', function (event) {
+				const shouldRunSingle = !batchMode.checked && event.key === 'Enter';
+				const shouldRunBatch = batchMode.checked && event.key === 'Enter' && (event.ctrlKey || event.metaKey);
+
+				if (shouldRunSingle || shouldRunBatch) {
+					event.preventDefault();
+					checkBtn.click();
+				}
+			});
+		}
+
+		function setModeVisuals(isBatch) {
+			modeLabel.innerText = isBatch ? 'Batch / 多目标' : 'Single / 单目标';
+			fieldHint.innerText = isBatch
+				? '批量模式下每行一个目标，按 Ctrl + Enter 可以直接开始检测。'
+				: '单条模式支持历史快速回填，按 Enter 可以直接开始检测。';
+		}
+
+		function showEmptyState(title, description) {
+			emptyStateTitle.innerText = title;
+			emptyStateDescription.innerText = description;
+			resultsEmpty.style.display = 'grid';
+		}
+
+		function hideEmptyState() {
+			resultsEmpty.style.display = 'none';
+		}
+
+		function setAppState(nextState) {
+			appState = nextState;
+			renderDashboard();
+		}
+
+		function renderDashboard() {
+			const failCount = Math.max(completedCount - successCount, 0);
+			const pendingCount = Math.max(totalTargets - completedCount, 0);
+
+			statTotal.innerText = String(totalTargets);
+			statSuccess.innerText = String(successCount);
+			statPending.innerText = String(pendingCount);
+			statFailed.innerText = String(failCount);
+
+			let headline = '等待输入';
+			let description = '当前阶段、实时统计。';
+			let meta = '结果、落地 IP 和地图会在这里按检测进度逐步展开。';
+			let pillText = 'Idle';
+
+			if (appState === 'resolving') {
+				headline = '正在解析目标';
+				description = '已接收 ' + inputCount + ' 条输入，正在展开为可检测地址。';
+				meta = '解析阶段进行中，准备把输入转换为候选目标。';
+				pillText = 'Resolving';
+			} else if (appState === 'running') {
+				headline = '正在检测 ' + totalTargets + ' 个目标';
+				description = '已完成 ' + completedCount + ' 个，当前有效 ' + successCount + ' 个。';
+				meta = completedCount + ' / ' + totalTargets + ' 已完成，结果会持续追加。';
+				pillText = 'Running';
+			} else if (appState === 'done') {
+				headline = '检测完成';
+				description = '有效 ' + successCount + ' / ' + totalTargets + '，失败 ' + failCount + '。';
+				meta = '本轮检测已结束，点击落地 IP 可展开地图详情。';
+				pillText = 'Completed';
+			} else if (appState === 'empty') {
+				headline = '未解析到可检测目标';
+				description = '请检查域名、IP 或端口格式后重新尝试。';
+				meta = '这次输入没有得到有效候选目标。';
+				pillText = 'Empty';
+			} else if (appState === 'error') {
+				headline = '检测过程中出现错误';
+				description = '请求被中断或远端接口异常，可以稍后再试。';
+				meta = '运行中断，结果可能不完整。';
+				pillText = 'Error';
+			}
+
+			summaryHeadline.innerText = headline;
+			summaryDescription.innerText = description;
+			resultMeta.innerText = meta;
+			resultPill.innerText = pillText;
+			resultPill.className = 'results-pill state-' + appState;
+		}
+
+		function updateProgress() {
+			const percent = totalTargets > 0 ? Math.round((completedCount / totalTargets) * 100) : 0;
+			progressBar.style.width = percent + '%';
+			progressText.innerText = completedCount + ' / ' + totalTargets;
+			renderDashboard();
+		}
+
+		function getHistory() {
+			try {
+				const parsed = JSON.parse(localStorage.getItem('cf_proxy_history') || '[]');
+				return Array.isArray(parsed) ? parsed : [];
+			} catch {
+				return [];
+			}
+		}
+
+		function saveHistory(value) {
+			if (!value || value.includes('\\n')) return;
+			let history = getHistory();
+			history = history.filter(function (item) {
+				return item !== value;
+			});
+			history.unshift(value);
+			history = history.slice(0, 10);
+			localStorage.setItem('cf_proxy_history', JSON.stringify(history));
+			renderHistory();
+		}
+
+		function selectHistory(value) {
+			inputList.value = value;
+			historyDropdown.style.display = 'none';
+			inputList.focus();
+		}
+
+		function renderHistory() {
+			const history = getHistory();
+			historyDropdown.innerHTML = '';
+
+			if (!history.length) {
+				const emptyItem = document.createElement('button');
+				emptyItem.type = 'button';
+				emptyItem.className = 'history-item is-empty';
+				emptyItem.innerText = '暂无历史记录';
+				historyDropdown.appendChild(emptyItem);
+				return;
+			}
+
+			history.forEach(function (item) {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'history-item';
+				button.innerText = item;
+				button.addEventListener('click', function () {
+					selectHistory(item);
+				});
+				historyDropdown.appendChild(button);
+			});
+		}
+
+		function createInputControl(isBatch, value) {
+			let control;
+
+			if (isBatch) {
+				control = document.createElement('textarea');
+				control.placeholder = '每行一个目标，例如：\\n8.223.63.150\\n[2606:4700::]:443\\nProxyIP.CMLiussss.net';
+			} else {
+				control = document.createElement('input');
+				control.type = 'text';
+				control.placeholder = '例如：ProxyIP.CMLiussss.net 或 8.223.63.150:443';
+			}
+
+			control.id = 'inputList';
+			control.className = 'input-control';
+			control.value = isBatch ? normalizeBatchInputValue(value || '') : (value || '');
+			return control;
+		}
+
+		function swapInputMode(isBatch) {
+			const currentValue = inputList.value;
+			const nextValue = isBatch ? currentValue : currentValue.split('\\n')[0];
+			const nextControl = createInputControl(isBatch, nextValue);
+
+			inputContainer.innerHTML = '';
+			inputContainer.appendChild(nextControl);
+
+			if (!isBatch) {
+				inputContainer.appendChild(historyBtn);
+				inputContainer.appendChild(historyDropdown);
+			}
+
+			inputList = nextControl;
+			historyDropdown.style.display = 'none';
+			setModeVisuals(isBatch);
+			bindInputShortcut();
+		}
+
+		function formatLatency(value) {
+			if (value === undefined || value === null || value === '') {
+				return '延迟未知';
+			}
+			const text = String(value);
+			return text.includes('ms') ? text : text + ' ms';
+		}
+
+		function joinUniqueValues(values, fallback) {
+			const uniqueValues = Array.from(new Set(values.filter(Boolean)));
+			return uniqueValues.length ? uniqueValues.join(' / ') : fallback;
+		}
+
+		function formatExitLocation(exitData) {
+			const country = String(exitData?.country || '').trim();
+			const city = String(exitData?.city || '').trim();
+			return [country, city].filter(Boolean).join(' · ');
+		}
+
+		function formatExitNetwork(exitData) {
+			const asn = String(exitData?.asn || '').trim();
+			const organization = String(exitData?.asOrganization || '').trim();
+
+			if (asn && organization) {
+				return 'AS' + asn + ' ' + organization;
+			}
+
+			if (asn) {
+				return 'AS' + asn;
+			}
+
+			return organization;
+		}
+
+		function getExitCountryCode(exitData) {
+			const candidates = [
+				exitData?.countryCode,
+				exitData?.country_code,
+				exitData?.countryIsoCode,
+				exitData?.country_iso_code,
+				exitData?.country
+			];
+
+			for (const candidate of candidates) {
+				const normalized = String(candidate || '').trim().toLowerCase();
+				if (/^[a-z]{2}$/.test(normalized)) {
+					return normalized;
+				}
+			}
+
+			return '';
+		}
+
+		function getFlagUrlFromExitIps(exitIps) {
+			for (const entry of exitIps) {
+				const countryCode = getExitCountryCode(entry.exitData);
+				if (countryCode) {
+					return 'https://ipdata.co/flags/' + countryCode + '.png';
+				}
+			}
+
+			return '';
+		}
+
+		function updateResultFlag(itemObj, flagUrl) {
+			if (!itemObj?.flag) return;
+
+			if (flagUrl) {
+				itemObj.el.classList.add('has-flag');
+				itemObj.flag.style.backgroundImage = 'url("' + flagUrl + '")';
+				return;
+			}
+
+			itemObj.el.classList.remove('has-flag');
+			itemObj.flag.style.backgroundImage = '';
+		}
+
+		function getExitSelectionKey(exitData, fallbackIp) {
+			return [
+				String(exitData?.ip || fallbackIp || '').trim(),
+				String(exitData?.ipType || '').trim().toLowerCase(),
+				normalizeColoCode(exitData?.colo),
+				String(exitData?.loc || '').trim()
+			].join('|');
+		}
+
+		function renderExitList(container, exitIps) {
+			container.innerHTML = '';
+
+			if (!exitIps.length) {
+				const note = document.createElement('span');
+				note.className = 'result-detail is-compact';
+				note.innerText = '暂无可展示的出口详情';
+				container.appendChild(note);
+				return;
+			}
+
+			const label = document.createElement('span');
+			label.className = 'exit-list-label';
+			label.innerText = '落地 IP';
+			container.appendChild(label);
+
+			exitIps.forEach(function (entry) {
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'exit-ip-btn';
+				button.innerText = entry.ip;
+				button.dataset.exitKey = getExitSelectionKey(entry.exitData, entry.ip);
+				button.addEventListener('click', function () {
+					showDetails(button, entry.exitData);
+				});
+				container.appendChild(button);
+			});
+		}
+
+		function addResultItem(ip) {
+			hideEmptyState();
+			const div = document.createElement('div');
+			div.className = 'result-item';
+			div.innerHTML =
+				'<div class="result-flag-overlay" aria-hidden="true"></div>' +
+				'<div class="result-top">' +
+					'<div class="result-info">' +
+						'<span class="result-label">候选目标</span>' +
+						'<span class="result-ip">' + escapeHtml(ip) + '</span>' +
+						'<span class="result-detail">已加入检测队列，正在等待返回结果。</span>' +
+					'</div>' +
+					'<span class="status-badge status-pending">等待中</span>' +
+				'</div>' +
+				'<div class="result-meta">' +
+					'<span class="meta-chip">准备建立检测请求</span>' +
+				'</div>' +
+				'<div class="exit-list"></div>' +
+				'<div class="map-container-wrapper"></div>';
+
+			resultsDiv.appendChild(div);
+
+			return {
+				el: div,
+				flag: div.querySelector('.result-flag-overlay'),
+				info: div.querySelector('.result-info'),
+				badge: div.querySelector('.status-badge'),
+				meta: div.querySelector('.result-meta'),
+				exitList: div.querySelector('.exit-list'),
+				mapContainer: div.querySelector('.map-container-wrapper')
+			};
+		}
+
+		async function checkIP(target) {
+			const itemObj = addResultItem(target);
+
+			try {
+				const response = await fetch('https://api.090227.xyz/check?proxyip=' + encodeURIComponent(target));
+				const data = await response.json();
+				completedCount++;
+
+				if (data.success) {
+					successCount++;
+					itemObj.el.className = 'result-item success';
+					itemObj.badge.className = 'status-badge status-success';
+					itemObj.badge.innerText = '可用';
+
+					const exitIps = [];
+					if (data.probe_results?.ipv4?.ok && data.probe_results.ipv4.exit) {
+						exitIps.push({ ip: data.probe_results.ipv4.exit.ip, exitData: data.probe_results.ipv4.exit });
+					}
+					if (data.probe_results?.ipv6?.ok && data.probe_results.ipv6.exit) {
+						exitIps.push({ ip: data.probe_results.ipv6.exit.ip, exitData: data.probe_results.ipv6.exit });
+					}
+
+					const locations = joinUniqueValues(exitIps.map(function (entry) {
+						return formatExitLocation(entry.exitData);
+					}), '地区未知');
+					const networks = joinUniqueValues(exitIps.map(function (entry) {
+						return formatExitNetwork(entry.exitData);
+					}), 'ASN / 运营商未知');
+					const latency = formatLatency(data.responseTime);
+					const flagUrl = getFlagUrlFromExitIps(exitIps);
+
+					updateResultFlag(itemObj, flagUrl);
+
+					itemObj.info.innerHTML =
+						'<span class="result-label">候选目标</span>' +
+						'<span class="result-ip">' + escapeHtml(data.candidate || target) + '</span>' +
+						'<span class="result-detail">代理验证通过，可继续查看出口位置、网络信息和地图分布。</span>';
+
+					const metaParts = [
+						'<span class="meta-chip meta-chip-strong">' + escapeHtml(latency) + '</span>',
+						'<span class="meta-chip">' + escapeHtml(locations) + '</span>',
+						'<span class="meta-chip">' + escapeHtml(networks) + '</span>',
+						'<span class="meta-chip">' + escapeHtml(exitIps.length + '个出口') + '</span>'
+					];
+					itemObj.meta.innerHTML = metaParts.join('');
+
+					renderExitList(itemObj.exitList, exitIps);
+				} else {
+					itemObj.el.className = 'result-item error';
+					updateResultFlag(itemObj, '');
+					itemObj.badge.className = 'status-badge status-error';
+					itemObj.badge.innerText = '不可用';
+					itemObj.info.innerHTML =
+						'<span class="result-label">候选目标</span>' +
+						'<span class="result-ip">' + escapeHtml(target) + '</span>' +
+						'<span class="result-detail">无法通过该代理访问 Cloudflare，请更换目标后重试。</span>';
+					itemObj.meta.innerHTML =
+						'<span class="meta-chip meta-chip-danger">检测未通过</span>' +
+						'<span class="meta-chip">' + escapeHtml(data.message || '远端返回失败结果') + '</span>';
+					itemObj.exitList.innerHTML = '';
+				}
+			} catch (error) {
+				completedCount++;
+				itemObj.el.className = 'result-item error';
+				updateResultFlag(itemObj, '');
+				itemObj.badge.className = 'status-badge status-error';
+				itemObj.badge.innerText = '失败';
+				itemObj.info.innerHTML =
+					'<span class="result-label">候选目标</span>' +
+					'<span class="result-ip">' + escapeHtml(target) + '</span>' +
+					'<span class="result-detail">检测请求执行失败，可能是接口异常或网络中断。</span>';
+				itemObj.meta.innerHTML =
+					'<span class="meta-chip meta-chip-danger">请求异常</span>' +
+					'<span class="meta-chip">请稍后重试</span>';
+				itemObj.exitList.innerHTML = '';
+			}
+
+			updateProgress();
+		}
+
+		async function showDetails(button, exitData) {
+			const item = button.closest('.result-item');
+			const container = item.querySelector('.map-container-wrapper');
+			const isOpen = container.style.display === 'block';
+			const nextSelectionKey = button.dataset.exitKey || getExitSelectionKey(exitData);
+			const isSameSelection = isOpen && container.dataset.activeExitKey === nextSelectionKey;
+			const currentToken = ++mapRenderToken;
+
+			document.querySelectorAll('.map-container-wrapper').forEach(function (panel) {
+				if (panel !== container) {
+					panel.style.display = 'none';
+					panel.dataset.activeExitKey = '';
+				}
+			});
+			document.querySelectorAll('.exit-ip-btn.is-active').forEach(function (activeButton) {
+				activeButton.classList.remove('is-active');
+			});
+
+			if (isSameSelection) {
+				container.style.display = 'none';
+				container.dataset.activeExitKey = '';
+				return;
+			}
+
+			container.dataset.activeExitKey = nextSelectionKey;
+			button.classList.add('is-active');
+			initMap();
+			container.appendChild(globalMap);
+			container.style.display = 'block';
+
+			setTimeout(async function () {
+				if (currentToken !== mapRenderToken || container.style.display !== 'block') {
+					return;
+				}
+
+				map.invalidateSize();
+
+				const exitLocation = parseCoordinatePair(exitData?.loc);
+				await loadCfLocations();
+				if (currentToken !== mapRenderToken || container.style.display !== 'block') {
+					return;
+				}
+
+				const cfLocation = getCfLocation(exitData?.colo);
+				const cfCoordinates = cfLocation ? [cfLocation.lat, cfLocation.lon] : null;
+				const hasExitLocation = isValidCoordinatePair(exitLocation);
+				const hasCfLocation = isValidCoordinatePair(cfCoordinates);
+
+				clearMapLayers();
+
+				if (hasExitLocation) {
+					const exitMarker = L.circleMarker(exitLocation, {
+						radius: 8,
+						weight: 2,
+						color: '#34d399',
+						fillColor: '#34d399',
+						fillOpacity: 0.3
+					}).addTo(map);
+					exitMarker.bindPopup(createExitPopup(exitData));
+					mapLayers.push(exitMarker);
+				}
+
+				if (hasCfLocation) {
+					const cfMarker = L.circleMarker(cfCoordinates, {
+						radius: 8,
+						weight: 2,
+						color: '#61dbff',
+						fillColor: '#61dbff',
+						fillOpacity: 0.28
+					}).addTo(map);
+					cfMarker.bindPopup(createCfPopup(cfLocation));
+					mapLayers.push(cfMarker);
+				}
+
+				if (hasExitLocation && hasCfLocation) {
+					const transitLine = L.polyline([exitLocation, cfCoordinates], {
+						color: '#8be9ff',
+						weight: 2,
+						opacity: 0.85,
+						dashArray: '8 6',
+						renderer: mapSvgRenderer
+					}).addTo(map);
+					mapLayers.push(transitLine);
+					applyArrowStyleToPolyline(transitLine);
+					map.fitBounds([exitLocation, cfCoordinates], {
+						padding: [36, 36],
+						maxZoom: 6
+					});
+					return;
+				}
+
+				if (hasExitLocation) {
+					map.setView(exitLocation, 6);
+					return;
+				}
+
+				if (hasCfLocation) {
+					map.setView(cfCoordinates, 5);
+					return;
+				}
+
+				map.setView([20, 0], 2);
+			}, 100);
+		}
+
+		batchMode.addEventListener('change', function () {
+			swapInputMode(batchMode.checked);
+		});
+
+		historyBtn.addEventListener('click', function (event) {
+			event.stopPropagation();
+			const isVisible = historyDropdown.style.display === 'block';
+			historyDropdown.style.display = isVisible ? 'none' : 'block';
+		});
+
+		document.addEventListener('click', function (event) {
+			if (!inputContainer.contains(event.target)) {
+				historyDropdown.style.display = 'none';
+			}
+		});
+
+		if (themeToggle) {
+			themeToggle.addEventListener('click', function () {
+				const currentTheme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
+				const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+				try {
+					localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+				} catch (error) {
+					console.warn('Failed to persist theme preference', error);
+				}
+				applyTheme(nextTheme, 'stored');
+			});
+		}
+
+		if (systemThemeQuery.addEventListener) {
+			systemThemeQuery.addEventListener('change', function (event) {
+				if (getStoredTheme()) return;
+				applyTheme(event.matches ? 'dark' : 'light', 'system');
+			});
+		} else if (systemThemeQuery.addListener) {
+			systemThemeQuery.addListener(function (event) {
+				if (getStoredTheme()) return;
+				applyTheme(event.matches ? 'dark' : 'light', 'system');
+			});
+		}
+
+		checkBtn.addEventListener('click', async function () {
+			const value = inputList.value.trim();
+			if (!value) return;
+
+			const lines = batchMode.checked
+				? normalizeBatchInputValue(value).split('\\n').map(function (line) { return line.trim(); }).filter(Boolean)
+				: [value];
+
+			if (!batchMode.checked) {
+				saveHistory(value);
+			}
+
+			resultsDiv.innerHTML = '';
+			progressBar.style.width = '0%';
+			progressText.innerText = '正在解析目标...';
+			showEmptyState('正在准备检测', '正在解析你输入的目标，请稍候。');
+
+			completedCount = 0;
+			successCount = 0;
+			totalTargets = 0;
+			inputCount = lines.length;
+
+			checkBtn.disabled = true;
+			setAppState('resolving');
+
+			try {
+				const allResolvedTargets = [];
+
+				for (const line of lines) {
+					try {
+						const response = await fetch('/resolve?proxyip=' + encodeURIComponent(line));
+						const targets = await response.json();
+						if (Array.isArray(targets)) {
+							allResolvedTargets.push(...targets);
+						}
+					} catch (error) {
+						console.error('Resolve error for', line, error);
+					}
+				}
+
+				if (allResolvedTargets.length > 0) {
+					totalTargets = allResolvedTargets.length;
+					setAppState('running');
+					updateProgress();
+
+					await Promise.all(allResolvedTargets.map(function (target) {
+						return checkIP(target);
+					}));
+
+					const failCount = Math.max(totalTargets - successCount, 0);
+					progressText.innerText = '总计 ' + totalTargets + ' · 有效 ' + successCount + ' · 失败 ' + failCount;
+					setAppState('done');
+				} else {
+					progressText.innerText = '未解析到目标';
+					showEmptyState('没有可检测的候选目标', '请检查输入格式，或确认域名是否存在 A / AAAA 记录。');
+					setAppState('empty');
+				}
+			} catch (error) {
+				console.error(error);
+				progressText.innerText = '系统错误';
+				showEmptyState('检测流程中断', '请求过程中发生异常，请稍后重试。');
+				setAppState('error');
+			} finally {
+				checkBtn.disabled = false;
+			}
+		});
+
+		window.onload = function () {
+			renderHistory();
+			setModeVisuals(false);
+			bindInputShortcut();
+			renderDashboard();
+			loadCfLocations();
+
+			const path = window.location.pathname.slice(1);
+			if (path && path.length > 3) {
+				const decodedPath = decodeURIComponent(path);
+				if (decodedPath !== 'resolve' && decodedPath !== 'favicon.ico') {
+					inputList.value = decodedPath;
+					window.history.replaceState({}, '', '/');
+					checkBtn.click();
+				}
+			}
+		};
+	</script>
 </body>
-</html>
-`;
-
-  return new Response(html, {
-    headers: { "content-type": "text/html;charset=UTF-8" }
-  });
+</html>`;
 }
