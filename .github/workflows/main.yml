@@ -2,10 +2,9 @@ name: Sync from upstream
 
 on:
   schedule:
-    # Runs every 3 days at 2:00 AM UTC
-    # Cron syntax: minute hour day_of_month month day_of_week
-    # 0 2 */3 * * : 2点0分 每3天执行一次 (例如, 月份的 1, 4, 7, 10... 号)
-    - cron: '0 2 */3 * *'
+    # 每天 UTC 时间 2:00 AM (北京时间 10:00 AM) 执行
+    # 设定为每月 15 号执行一次
+    - cron: '0 2 15 * *'
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
