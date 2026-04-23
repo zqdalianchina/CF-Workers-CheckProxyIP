@@ -1,11 +1,7 @@
 name: Sync from upstream
 
 on:
-  schedule:
-    # 每天 UTC 时间 2:00 AM (北京时间 10:00 AM) 执行
-    # 设定为每月 15 号执行一次
-    - cron: '0 2 15 * *'
-  # Allows you to run this workflow manually from the Actions tab
+ # 已删除 schedule 部分，不再自动执行
   workflow_dispatch:
 
 jobs:
